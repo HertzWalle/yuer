@@ -30,7 +30,9 @@ import {
   tickAgency,
 } from './agency.mjs';
 import { dueSoon, extractCommitments, humanTime, loadCommitments, markStatus, openItems } from './commitments.mjs';
-import { generateCommitmentMessage, generateProactive, moodWord } from './proactive.mjs';
+import { generateCommitmentMessage, generateMood, generateProactive, moodWord } from './proactive.mjs';
+import { cleanMood, publishMood, readFeed } from './qzone.mjs';
+import { addNote } from './semantic.mjs';
 import {
   GROUP_DEFAULTS,
   applyAnnoyanceCooldown,
@@ -65,12 +67,34 @@ const DEFAULTS = {
   dryRun: false,
 };
 
+const QZONE_DEFAULTS = {
+  enabled: false,
+  /** 每天几点之后去读一次动态（读了写进语义记忆，聊天时能自然提起） */
+  readHour: 21,
+  readNum: 10,
+  /** 只记最近几天的动态，别把十年前的老帖翻出来当"最近看到的" */
+  freshDays: 30,
+  /** 允不允许自己发说说（B 档）；关掉就只读不写 */
+  publishEnabled: false,
+  dailyLimit: 1,
+  /** 冲动攒到多少才愿意发一条 */
+  impulseThreshold: 85,
+  impulseCost: 30,
+  maxChars: 90,
+  /** true = 只生成、写 trace、不真的发（先观察几天文案像不像样） */
+  dryRun: true,
+  /** 连续失败几次就自动停用（空间接口一旦被风控，继续打只会更糟） */
+  maxFails: 3,
+  timeoutMs: 20_000,
+};
+
 const ENTRY = 'main';
 const pad = (n) => String(n).padStart(2, '0');
 
 /** pet-api 的 recentMessages 在云端返回 {ok,messages}，桌面端返回数组——统一成数组 */
 const historyOf = (r) => (Array.isArray(r) ? r : Array.isArray(r?.messages) ? r.messages : []);
 const clock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
 export function createScheduler({ conf, log, now = () => new Date() }) {
   const p = { ...DEFAULTS, ...(conf.proactive || {}) };
@@ -81,6 +105,19 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
 
   // 群聊各参数：阈值更高、配额更紧，默认每群每天只说一次
   const g = { ...GROUP_DEFAULTS, ...(p.group || {}) };
+  // QQ 空间：配置写在 pet.json 的 qzone 段（bridge.config.json 里没有），第一次用到时懒加载
+  let qzCache = null;
+  async function qzConfig() {
+    if (qzCache) return qzCache;
+    let fromPet = {};
+    try {
+      fromPet = (await loadPet())?.qzone ?? {};
+    } catch {
+      /* 读不到就用默认值：默认关闭，安全 */
+    }
+    qzCache = { ...QZONE_DEFAULTS, ...fromPet, ...(conf.qzone || {}) };
+    return qzCache;
+  }
   const buffers = new Map(); // conv → [{ name, text, at, atBot }]
   const whitelist = new Set((conf.groupWhitelist || []).map(String).filter(Boolean));
 
@@ -361,8 +398,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
   }
 
   /** /心思 里的群聊那段 */
-  async function groupLines(t) {
-    const db = await loadGroups(t);
+  async function groupLines(t) {    const db = await loadGroups(t);
     const rows = Object.entries(db.groups)
       .filter(([, v]) => v && Number(v.lastMessageAt || 0) > 0)
       .sort((a, b) => Number(b[1].lastMessageAt) - Number(a[1].lastMessageAt))
@@ -374,6 +410,123 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
       const spoke = v.lastSpokeAt ? `，上次开口 ${clock(new Date(v.lastSpokeAt))}` : '';
       return `群 ${gid}：冲动 ${Math.round(v.impulse || 0)}/${g.threshold}，反感 ${Math.round(v.annoyance || 0)}${cool}${spoke}，今天 ${Number(v.sentToday || 0)}/${g.dailyPerGroup}`;
     });
+  }
+
+  /* ------------------------------- QQ 空间 ------------------------------- */
+
+  const rpc = (timeoutMs) => ({
+    ws: process.env.ONEBOT_WS || 'ws://127.0.0.1:3001',
+    token: process.env.ONEBOT_TOKEN || '',
+    timeoutMs: Number(timeoutMs) || Number(QZONE_DEFAULTS.timeoutMs),
+  });
+
+  function qzoneState(agency) {
+    if (!agency.qzone || typeof agency.qzone !== 'object') agency.qzone = {};
+    return agency.qzone;
+  }
+
+  /** 读一次动态（主人那页 + 自己那页），只记最近的，不把十年前的老帖翻出来 */
+  async function readQzone(agency, t) {
+    const qz = await qzConfig();
+    const qa = qzoneState(agency);
+    const who = ownerIds[0] || '';
+    const freshMs = Math.max(1, Number(qz.freshDays) || 30) * 24 * 3_600_000;
+    const targets = who ? [who, ''] : [''];
+    const picked = [];
+    let lastErr = null;
+
+    for (const uin of targets) {
+      const res = await readFeed({ ...rpc(qz.timeoutMs), uin, num: Number(qz.readNum) || 10 });
+      if (!res.ok) {
+        lastErr = res;
+        continue;
+      }
+      for (const it of res.items || []) {
+        if (!it.text) continue;
+        if (t.getTime() - Number(it.at || 0) > freshMs) continue;
+        const whose = who && it.uin === who ? '主人' : '我';
+        picked.push({ text: `${whose}动态：${it.text.slice(0, 60)}`, at: it.at || t.getTime() });
+      }
+    }
+
+    if (!picked.length && lastErr) {
+      qa.fails = Number(qa.fails || 0) + 1;
+      await trace({ kind: 'qzone-read-error', reason: lastErr.reason, message: lastErr.message, fails: qa.fails });
+      return lastErr;
+    }
+
+    for (const p of picked.slice(0, 5)) await addNote('qzone', p.text, { at: p.at });
+    qa.readDay = dayKey(t);
+    qa.fails = 0;
+    await trace({ kind: 'qzone-read', uin: who, count: picked.length, sample: picked.slice(0, 3).map((x) => x.text) });
+    return { ok: true, items: picked };
+  }
+
+  /** A 档读动态 + B 档偶尔发一条纯文字说说（默认 dry-run，只写 trace 不发） */
+  async function runQzone(agency, t, dry) {
+    const qz = await qzConfig();
+    if (!qz.enabled) return;
+    const qa = qzoneState(agency);
+    if (qa.disabled) return;
+    if (Number(qa.fails || 0) >= Number(qz.maxFails)) {
+      qa.disabled = true;
+      await trace({ kind: 'qzone-disabled', fails: qa.fails });
+      log.warn('QQ 空间连续失败，已自动停用（/空间 开 可恢复）');
+      return;
+    }
+
+    const day = dayKey(t);
+
+    if (t.getHours() >= Number(qz.readHour) && qa.readDay !== day) {
+      await readQzone(agency, t);
+    }
+
+    if (!qz.publishEnabled) return;
+    if (qa.sentDay === day) return;
+    if (inQuietHours(t, quiet)) return;
+    if (Number(agency.impulse.owner || 0) < Number(qz.impulseThreshold)) return;
+
+    const ctx = await personaFor('private');
+    const history = historyOf(await recentMessages(petId, 8));
+    const maxChars = Number(qz.maxChars) || 90;
+    const res = await generateMood({ pet: ctx, now: t, history, mood: agency.mood, maxChars });
+    if (!res.ok) {
+      qa.fails = Number(qa.fails || 0) + 1;
+      await trace({ kind: 'qzone-draft-error', reason: res.reason, message: res.message, fails: qa.fails });
+      return;
+    }
+    if (!res.say) {
+      qa.sentDay = day; // 今天决定不发，别每个 tick 再问一遍
+      await trace({ kind: 'qzone-skip', think: res.think });
+      return;
+    }
+
+    const body = cleanMood(res.say, maxChars);
+    if (!body) {
+      qa.sentDay = day;
+      await trace({ kind: 'qzone-skip', think: res.think, why: 'empty-after-clean' });
+      return;
+    }
+
+    if (qz.dryRun || dry) {
+      qa.dryDay = day;
+      await trace({ kind: 'qzone-dry', think: res.think, say: body, impulse: Math.round(agency.impulse.owner) });
+      log.info(`[dry] 今天想发的说说：${body}`);
+      return;
+    }
+
+    const posted = await publishMood({ ...rpc(qz.timeoutMs), text: body, maxChars });
+    if (posted.ok) {
+      qa.sentDay = day;
+      qa.fails = 0;
+      agency.impulse.owner = Math.max(0, Number(agency.impulse.owner || 0) - Number(qz.impulseCost));
+      await trace({ kind: 'qzone-publish', think: res.think, say: posted.text });
+      log.info(`发了条说说：${posted.text}`);
+    } else {
+      qa.fails = Number(qa.fails || 0) + 1;
+      await trace({ kind: 'qzone-publish-error', reason: posted.reason, message: posted.message, fails: qa.fails });
+      log.warn(`发说说失败（${posted.reason}）：${posted.message ?? ''}`);
+    }
   }
 
   /** 一次完整决策（导出给测试与 CLI 用） */
@@ -395,6 +548,8 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
       await runImpulse(agency, t, dry);
       // 群聊独立算账：私聊被暂停/静默不影响群，反之亦然
       if (!inQuietHours(t, quiet)) await runGroups(agency, t, dry);
+      // 空间也独立：读动态按 readHour，发说说自己看阈值/静默/dryRun
+      await runQzone(agency, t, dry);
     }
 
     warmup = false;
@@ -473,9 +628,60 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
         next ? `最近一条承诺：${humanTime(next.dueAt, t)} ${next.what}` : '承诺：没有待兑现的',
         isPaused(agency, t) ? `暂停中：到 ${clock(new Date(agency.pausedUntil))} 前不会主动` : '暂停：无',
         agency.misses ? `被冷落：${agency.misses} 次（会让她更谨慎）` : '',
+        agency.qzone?.disabled
+          ? '空间：已停用'
+          : agency.qzone?.sentDay === dayKey(t)
+            ? '空间：今天已经发过一条'
+            : '空间：今天还没发',
         ...(await groupLines(t)),
       ].filter(Boolean);
       return lines.join('\n');
+    }
+
+    if (['空间', '说说', 'qzone'].includes(cmd)) {
+      const agency = await loadAgency(t);
+      const qz = await qzConfig();
+      const qa = qzoneState(agency);
+      const [sub = '', ...tail] = arg.split(/\s+/).filter(Boolean);
+      const rest = tail.join(' ');
+      const isOwner = !ownerIds.length || ownerIds.includes(String(msg?.senderId ?? ''));
+      const maxChars = Number(qz.maxChars) || 90;
+
+      if (sub === '发') {
+        if (!isOwner) return '这个只有主人能让我发。';
+        if (!rest) return '要发什么？发「/空间 发 今天天气不错」这样。';
+        const body = cleanMood(rest, maxChars);
+        const posted = await publishMood({ ...rpc(qz.timeoutMs), text: body, maxChars });
+        await trace({ kind: 'qzone-manual', ok: posted.ok, reason: posted.reason, say: body });
+        return posted.ok ? `发出去了：「${posted.text}」` : `没发成（${posted.reason}）：${posted.message ?? ''}`;
+      }
+      if (sub === '读') {
+        const res = await readQzone(agency, t);
+        await saveAgency(agency);
+        return res.ok ? `看了 ${res.items?.length ?? 0} 条动态，记下来了。` : `看不了（${res.reason}）：${res.message ?? ''}`;
+      }
+      if (sub === '关') {
+        qa.disabled = true;
+        await saveAgency(agency);
+        return '好，空间那边我先不碰了（不发也不看）。想恢复就发「/空间 开」。';
+      }
+      if (sub === '开') {
+        qa.disabled = false;
+        qa.fails = 0;
+        await saveAgency(agency);
+        return `开了。看动态每天 ${pad(qz.readHour)}:00 之后一次；发说说${qz.publishEnabled ? `每天最多 ${qz.dailyLimit} 条` : '还是关着的（配置里 publishEnabled=false）'}。`;
+      }
+
+      return [
+        '【QQ 空间】',
+        `状态：${qa.disabled ? '已停用' : qz.enabled ? '在用' : '没开（配置 qzone.enabled=false）'}`,
+        `看动态：每天 ${pad(qz.readHour)}:00 之后读一次${qa.readDay ? `，今天已读` : '，今天还没读'}`,
+        `发说说：${qz.publishEnabled ? `允许，每天最多 ${qz.dailyLimit} 条` : '只读不发'}${qz.dryRun ? '（dry-run，只预览不真发）' : ''}`,
+        qa.sentDay === dayKey(t) ? '今天已经发过一条' : '今天还没发',
+        qa.fails ? `连续失败：${qa.fails}/${qz.maxFails}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n');
     }
 
     if (['安静', '闭嘴', 'pause'].includes(cmd)) {

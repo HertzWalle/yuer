@@ -9,7 +9,7 @@
  * 目的：换机器部署前先在本机确认这套代码本身是通的。
  */
 
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -45,8 +45,23 @@ const { createBridge } = await import(pathToFileURL(join(DIST, 'qq-bridge.mjs'))
 const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href);
 
 const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8'));
-// 自测里把带图概率固定成 100%，否则 35% 的随机会让断言飘；气泡间隔调 0，别让测试等
-conf.behavior = { ...(conf.behavior || {}), memeChance: 1, bubbleDelayMs: 0, typingDelayMs: 0 };
+// 气泡间隔/尾巴停顿调 0，别让测试干等
+conf.behavior = { ...(conf.behavior || {}), bubbleDelayMs: 0, typingDelayMs: 0, tailPauseMs: 0 };
+
+// 配图资格现在在生成层掷骰子：自测里百分百给资格、且关掉冷却，否则断言会飘
+{
+  const petFile = join(tmp, 'data', 'pet.json');
+  const pet = JSON.parse(await readFile(petFile, 'utf8'));
+  Object.assign(pet, {
+    memeChancePrivate: 1,
+    memeChanceGroup: 1,
+    memeCooldown: 0,
+    maxBubbles: 6,
+    // 自测不联网：空间关掉（否则每次 tick 都会试着连 OneBot 拿 cookie）
+    qzone: { ...(pet.qzone || {}), enabled: false },
+  });
+  await writeFile(petFile, JSON.stringify(pet, null, 2), 'utf8');
+}
 const personas = await petApi.loadPersonas(join(DIST, 'personas.json'));
 
 const sent = [];
@@ -163,10 +178,91 @@ async function main() {
   await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/ping' } }] }));
   check('/ping → pong', segText(last()?.segments ?? '') === 'pong');
 
+  await testBubbles();
+  await testMemeCooldown();
+  await testQzoneHelpers();
+
   await testAgency();
 
   // 12 备份服务：起进程 → /health、鉴权、/memory、快照
   await testBackup();
+}
+
+/* ------------------------------ 气泡拆分自测 ------------------------------- */
+
+async function testBubbles() {
+  const { splitBubbles } = petApi;
+
+  const own = splitBubbles('嗯\n好\n知道了，我这就去办');
+  check('模型分段直接采纳（两字气泡单独成条）', own.length === 3 && own[0] === '嗯' && own[1] === '好', JSON.stringify(own));
+
+  const short = splitBubbles('在呢，刚躺下。', { rng: () => 0.99 });
+  check('短句默认整条', short.length === 1, JSON.stringify(short));
+
+  const short2 = splitBubbles('今天天气不错，出来走走吧。', { rng: () => 0 });
+  check('短句按概率拆两条', short2.length === 2, JSON.stringify(short2));
+
+  const mid = '我跟你说啊，今天下午服务器又抽风了，重启了三回才活过来，最后发现是内存不够，真是服了。';
+  const midOne = splitBubbles(mid, { rng: () => 0 });
+  check('中长段落可以整段一条（长段落模式）', midOne.length === 1 && midOne[0].length === mid.length, `${midOne.length} 条 / ${mid.length} 字`);
+
+  const longOne = '啊'.repeat(120);
+  const longParts = splitBubbles(longOne, { rng: () => 0 });
+  check('超长且没有句读时不硬拆', longParts.length === 1, `${longParts.length} 条`);
+
+  const many = splitBubbles('第一句\n第二句\n第三句\n第四句\n第五句\n第六句\n第七句\n第八句\n第九句');
+  check('气泡软上限 6 条', many.length === 6, `${many.length} 条`);
+}
+
+/* --------------------------- 表情包冷却（生成层） ---------------------------- */
+
+async function testMemeCooldown() {
+  const petFile = join(tmp, 'data', 'pet.json');
+  const pet = JSON.parse(await readFile(petFile, 'utf8'));
+  Object.assign(pet, { memeChancePrivate: 1, memeCooldown: 5 });
+  await writeFile(petFile, JSON.stringify(pet, null, 2), 'utf8');
+
+  // 手动塞一条「刚带过图」的私聊记录：冷却必然生效（不依赖前面对话的随机结果）
+  await writeFile(
+    join(tmp, 'data', 'chatter.json'),
+    JSON.stringify({ recent: [{ kind: 'private', at: Date.now(), image: true }] }),
+    'utf8',
+  );
+
+  mock.setReplyResolver(() => '累成这样，先歇会儿吧。\n[图:吃白饭的大肥鱼]');
+  const n = sent.length;
+  await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '今天累死了' } }] }));
+  const added = sent.slice(n);
+  const imgs = added.flatMap((x) => x.segments).filter((s) => s.type === 'image');
+  const text = added.map((x) => segText(x.segments)).join('');
+  check('带图冷却：刚带过图就不给资格', imgs.length === 0, `新增 ${added.length} 条，图 ${imgs.length} 张`);
+  check('没资格时 [图:…] 标记被剥掉', text.length > 0 && !text.includes('[图'), text.slice(0, 40));
+  mock.setReplyResolver(null);
+}
+
+/* ------------------------- 空间与语义记忆（纯函数） -------------------------- */
+
+async function testQzoneHelpers() {
+  const load = (p) => import(pathToFileURL(join(DIST, 'lib', p)).href);
+  const { gTk, cleanMood } = await load('qzone.mjs');
+  const { addNote, recentNotes, notesBrief } = await load('semantic.mjs');
+
+  // g_tk 是空间接口的门票：同一个 skey 必须永远算出同一个数（这里钉一个已知值）
+  check('g_tk 计算稳定', gTk('@abcdefg') === gTk('abcdefg') && gTk('@abcdefg') > 0, String(gTk('@abcdefg')));
+
+  const clean = cleanMood('  今天好累 https://x.com/a @某人  空调又坏了  ', 90);
+  check('说说正文去掉链接与 @', clean === '今天好累 空调又坏了', clean);
+
+  const long = cleanMood('一'.repeat(200), 20);
+  check('说说正文按上限截断', long.length === 20, `${long.length} 字`);
+
+  await addNote('qzone', '主人动态：机房空调又坏了');
+  await addNote('qzone', '主人动态：机房空调又坏了'); // 同文应去重
+  const notes = await recentNotes(10, 'qzone');
+  check('语义记忆同文去重', notes.length === 1, `${notes.length} 条`);
+
+  const brief = await notesBrief('qzone', 5);
+  check('语义记忆能拼成背景提示', brief.includes('【你最近看到的】') && brief.includes('空调'), brief.slice(0, 40));
 }
 
 /* ----------------------------- 主动性（P1a）自测 ---------------------------- */

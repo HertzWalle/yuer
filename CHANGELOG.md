@@ -3,6 +3,22 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.3.0 — 2026-10-24
+
+更像真人、也更省 token：表情包改成「先决定要不要配图」，气泡条数改由内容决定，并给她加上 QQ 空间（看动态 + 每天最多一条说说）。
+
+- `feat(memes)`: 配图资格前移到**生成层**——`cloud/lib/pet-api.mjs` 的 `memeGate()` 每轮先掷骰子（私聊 `memeChancePrivate` 0.18 / 群聊 `memeChanceGroup` 0.06 / `memeCooldown` 5 条内带过图就锁），没资格时**整份表情包清单都不进 prompt**（省约 1.3k token/轮）；模型硬写 `[图:…]` 时 `stripMemeTag()` 兜底剥掉。
+- `feat(memes)`: 新增 `data/chatter.json`（`noteChatter` / `chatterStats`，只记有没有图不记正文），`/状态` 显示最近 20 条实际带图比例；`behavior.memeChance` 从发送层删除（挑完图再扔掉是白花 token）。
+- `feat(chat)`: `splitBubbles()` 重写为按内容决定形态——≤30 字多数整条、30~90 字 40% 保持整段否则切 2~3 条、>90 字默认整段（句读 ≥2 才切、最多 4 条）；`maxBubbles` 默认 6（上限 8），超限改成「反复合并最短的相邻一对」；允许两字气泡；最后一条 ≤12 字时多等 `behavior.tailPauseMs`（800ms）。
+- `feat(qzone)`: 新增 `cloud/lib/qzone.mjs`——`callOneBot()` 一次性 WS 调 `get_cookies`，`gTk()` 用 **p_skey** 算 `g_tk`；发布优先走 NapCat 原生 `send_qzone_msg`，退回网页 `emotion_cgi_publish_v6`；只用 `emotion_cgi_msglist_v6` 读动态（NapCat 没有可用的读列表 action）。
+- `feat(semantic)`: 新增 `cloud/lib/semantic.mjs` + `data/semantic.json`——看到的事压成一句（同文 7 天去重、最多 60 条），私聊 system 拼 `notesBrief()`（群里不注入）。
+- `feat(qzone)`: `cloud/lib/scheduler.mjs` 加 `runQzone()`——到 `readHour`（21 点）读一次动态写语义记忆；`publishEnabled` + 冲动 ≥85 + 当天未发才发一条 ≤90 字纯文字说说；`dryRun` 默认 true 只写 `qzone-dry`；连败 3 次自动停用（`qzone-disabled`）。指令 `/空间`、`/空间 发 <文字>`、`/空间 读`、`/空间 关`、`/空间 开`。
+- `feat(proactive)`: 新增 `generateMood()`——写说说用的提示词（一句话、不要标签/链接/@、不要营销腔、没话说 SKIP）。
+- `fix(scheduler)`: 空间配置原本读 `bridge.config.json` 拿不到（配置在 `pet.json` 的 `qzone` 段，表现为 `runQzone` 直接 return）→ 改成 `qzConfig()` 懒加载 pet.json。
+- `fix(build)`: `dist/` 会带上本机自测写的 `logs/trace.jsonl`，部署时把线上决策日志冲掉 → build 结束删 `dist/logs`，打包再加 `--exclude logs`。
+- `test`: 自测 52/52（新增 6 项气泡形态、1 项配图冷却、5 项空间助手函数）。
+
+
 ## v1.2.0 — 2026-10-24
 
 S2 群注意力：群里不 @ 她也会「旁听」，攒够了才决定要不要自己插一句。

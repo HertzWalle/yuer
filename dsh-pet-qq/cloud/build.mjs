@@ -124,7 +124,7 @@ async function main() {
 
   // 云端 lib：pet-api 换成云实现，其余（下载器不需要）不打包
   await cp(join(HERE, 'lib', 'pet-api.mjs'), join(DIST, 'lib', 'pet-api.mjs'));
-  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs']) {
+  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs']) {
     await cp(join(HERE, 'lib', f), join(DIST, 'lib', f));
   }
 
@@ -137,6 +137,9 @@ async function main() {
   await cp(join(HERE, '.env.example'), join(DIST, '.env.example'));
   await cp(join(HERE, 'deploy.md'), join(DIST, 'deploy.md'));
   await cp(join(HERE, 'systemd'), join(DIST, 'systemd'), { recursive: true });
+
+  // 本机跑自测会往 dist/logs 写 trace，绝不能带到线上（会覆盖线上决策记录）
+  await rm(join(DIST, 'logs'), { recursive: true, force: true });
 
   const files = [];
   async function walk(dir, prefix = '') {

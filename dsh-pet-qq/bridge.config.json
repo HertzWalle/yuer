@@ -11,13 +11,13 @@
     "privateReply": true,
     "groupReply": "at",
     "sendMeme": true,
-    "memeChance": 0.35,
     "imageDelayMs": 600,
     "typingDelayMs": 300,
     "logMessages": true,
     "errorReply": "呜……脑袋卡住了，等我一下下。",
-    "maxBubbles": 3,
+    "maxBubbles": 6,
     "bubbleDelayMs": 700,
+    "tailPauseMs": 800,
     "observeGroups": true
   },
   "proactive": {

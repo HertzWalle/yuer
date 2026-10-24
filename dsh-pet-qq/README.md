@@ -184,6 +184,21 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
 - 想看每个群的账：`/心思` 末尾会列出各群「冲动/120、反感、冷却、今天几次」。翻账：`sudo tail -f /opt/dsh-pet/logs/trace.jsonl`（`group-gate` / `group-skip` / `group-proactive` / `group-cooldown`）。
 - 调参都在 `bridge.config.json` 的 `proactive.group`：`threshold`、`dailyPerGroup`、`minGapHours`、`scoreMin`、`bufferMin`、`perMessage`、`mentionBonus`、`topicBonus`。
 
+### QQ 空间（A 档读动态 / B 档发说说）
+
+> 需求来源见 `docs/ROADMAP.md` 的 S3；用户定的档位是「#3 做到 B 档」。**默认 `dryRun: true`**，只生成不发布。
+
+- **A 档 · 看**：每天 `readHour`（默认 21 点）通过 OneBot `get_cookies` 拿 qzone cookie，用 `p_skey` 算 `g_tk`，走 `emotion_cgi_msglist_v6` 读主人和她自己的动态；只收 `freshDays`（30 天）内的，每条压成一句写进 **语义记忆** `data/semantic.json`（同文 7 天去重、最多留 60 条）。私聊的 system prompt 会带上最近 5 条（`【你最近看到的】…别刻意汇报`），所以她会「记得你发过什么」，但不会背课文。
+- **B 档 · 发**：每天最多 **1 条纯文字**说说，只在冲动 ≥ `impulseThreshold`（默认 85）且当天没发过时才考虑；先让模型写一句（≤90 字、不要话题标签/链接/@、不要营销腔），`cleanMood()` 清洗后再发。
+- 发布优先走 NapCat 原生 action **`send_qzone_msg`**（`{content, images: [], ugc_right: 1, target_uins: []}` → `{tid}`）；不可用时退回网页 CGI `emotion_cgi_publish_v6`。发成功后 QQ 客户端里那套「发布了动态 / 已发布」卡片是它自己渲染的，不需要伪造。
+- 安全阀：`dryRun` 时只在 trace 写一条 `qzone-dry`；连续失败 `maxFails`（3）次自动停用并写 `qzone-disabled`；`/空间 关` 一刀切。
+- 指令：
+  - `/空间` —— 面板：启停、看动态时间、今天读没读、发说说配额、今天发没发、连败次数
+  - `/空间 发 <文字>` —— 立刻手动发一条（仅主人；会跳过 dryRun）
+  - `/空间 读` —— 立刻读一次动态并写进语义记忆
+  - `/空间 关` / `/空间 开` —— 停用 / 恢复（恢复时清掉连败计数）
+- 配置在 `cloud/data/pet.json` 的 `qzone` 段：`enabled`、`readHour`、`readNum`、`freshDays`、`publishEnabled`、`dailyLimit`、`impulseThreshold`、`impulseCost`、`maxChars`、`dryRun`、`maxFails`。
+- 已知边界：`g_tk` 必须用 **p_skey**、域名必须是 `taotao.qq.com`（`taotao.qzone.qq.com` 会返回 `code=-10000 使用人数过多`）；skey 会过期，过期后读/发都会失败并计一次 fails；非官方接口，频率高了有风控风险——所以日上限写死 1 条、默认 dryRun。
 ### 谁会被回复
 
 - 私聊：默认都回。
@@ -201,7 +216,8 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
 - **每个分类是一个目录**（`data/memes/开心/` 下若干张 png/jpg/gif），模型只说「发开心的」，发哪张由服务端**随机挑**——同一分类不会每次都同一张图。
 - 协议没变：模型在回复末尾写 `[图:名称]`，云端解析命中后把图转 base64 走 OneBot 发出；名字对不上就丢掉标记、正文照发，绝不吞回复。
 - **表情包单独成一条**：文字先发，隔 `imageDelayMs`（默认 600ms）再发图，看起来像「说完话甩一张图」，而不是一条气泡里挤着字和图。
-- **不是每条都带图**：`bridge.config.json` 的 `behavior.memeChance`（默认 `0.35`，即约 35% 的回复带一张）+ 提示词里明确要求「大多数回复不要带图」。想更克制调 `0.15`，想逢句必图调 `1`。
+- **不是每条都带图，而且「有没有配图资格」在生成前就定了**：`cloud/lib/pet-api.mjs` 的 `memeGate()` 先掷骰子——私聊 `pet.json` 的 `memeChancePrivate`（默认 `0.18`）、群聊 `memeChanceGroup`（默认 `0.06`）。没资格时**整份表情包清单都不塞给模型**（省下约 1.3k token/轮），只让它正常说话；模型万一还是写了 `[图:…]`，`stripMemeTag()` 会兜底剥掉。
+- 会话级冷却：`memeCooldown`（默认 `5`）条之内带过图就强制没资格，避免连着甩图；`memeEnabled: false` 可一键关掉。`/状态` 会显示最近 20 条里实际带图的比例（`noteChatter()` 记在 `data/chatter.json`，只记有没有图、不记正文）。
 - **尺寸已压到正常聊天表情包大小**：`cloud/shrink-memes.py` 把长边缩到 **240px**（LANCZOS，GIF 逐帧保留动画，JPG q88），21.3 MB → 10.3 MB。
 - 进池子的图有筛选：每个分类最多 5 张、单张 ≤1.8 MB（超了会先挑小的），`chatImageLimit` 自动等于池子大小（现在是 54）。池子越大提示词越长，54 个名约 1.3k token/条。
 
@@ -218,13 +234,14 @@ node cloud/build.mjs
 
 ### 对话节奏（像真人那样连发几条）
 
-以前不管说什么都只回一条，像客服。现在一条回复可以被拆成 **1~4 个气泡**，中间隔着「继续打字」的停顿：
+一条回复可以是一整段、也可以是 **2~6 个气泡**，条数由内容决定，不再写死：
 
-- 模型侧：`cloud/lib/pet-api.mjs` 在 system 末尾追加 `REPLY_STYLE`——「像在 QQ 上打字：分 1~3 条短消息（换行隔开），每条尽量 20 字以内，问题再复杂也先说结论」；`personas.json` 每个人格的【输出格式】也补了同样要求。
-- 拆分侧：`splitBubbles(text, {max, chance})` 两条路径——模型自己用换行/`||` 分好的直接采纳；模型只给一整句时，**按概率**（`pet.json` 的 `splitChance`，默认 `0.5`）在标点处断一次，短句（<26 字）不拆。
-- 收尾规则：去掉列表符号；前几条结尾的「，」「；」会被剥掉（真人分两条发时很少留个逗号吊着）；某条超过 70 字会按句号再切；最后一条拼起来超过 90 字会在标点处截断加「…」。
-- 发送侧：`qq-bridge.mjs` 的 `sendReply` 逐条发——第一条等 `typingDelayMs`（默认 300ms），之后每条 `bubbleDelayMs`（默认 700ms）+ 字数×22ms（上限 600）+ 0~250ms 随机，短句快、长句慢。
-- 调参：`bridge.config.json` 的 `behavior.maxBubbles`（最多几条，默认 3）、`behavior.bubbleDelayMs`；`cloud/data/pet.json` 的 `maxBubbles` / `splitChance`。想要更话痨就把 `splitChance` 调到 0.8，想要一条说完就调到 0.2。
+- 模型侧：`REPLY_STYLE` 让它自己选——「想连发就分成 2~4 条短句（每条约 20 字）；想一口气说完就整段一条，别为了拆而拆」。
+- 拆分侧：`splitBubbles(text, { max, bias })` 先看模型有没有自己分段（换行/`||`）；只给一段时按字数决定形态——≤30 字多数整条（30% 概率断成两条）、30~90 字有 40% 保持整段一条（长段落模式）否则切 2~3 条、>90 字**默认整段一条**，只有句读 ≥2 才按句子切、最多 4 条（没标点的长文绝不硬拆）。
+- 软上限：`maxBubbles`（`pet.json`，默认 6、上限 8）；超了不做「全塞最后一条」，而是**反复合并最短的相邻一对**，保住说话的节奏。允许「嗯」「好」这种两字气泡单独成条。
+- 想到一句再补：最后一条如果 ≤12 字，发送侧会多等 `behavior.tailPauseMs`（默认 800ms）——像打完一句又想起半句。
+- 发送侧：第一条等 `typingDelayMs`（默认 300ms），之后每条 `bubbleDelayMs`（700ms）+ 字数×22ms（≤600）+ 0~250ms 随机，短句快、长句慢。
+- 调参：`behavior.maxBubbles` / `tailPauseMs` / `bubbleDelayMs`；`cloud/data/pet.json` 的 `maxBubbles` / `splitChance`（0.5 基准，调大更容易拆、调小更容易整段）。
 - 记忆里存的是拼起来的一整段（`segments.join(' ')`），所以下次读历史不会碎成一堆短句。
 
 ## 文件
@@ -265,7 +282,12 @@ node cloud/build.mjs
 | `cloud/merge-memes.mjs` | 服务器侧：把 `memes.extra.json` 合进线上 `pet.json`（不动人设与记忆） |
 | `cloud/remote-deploy-memes.sh` | 服务器侧一键：更新代码 + 解表情包 + 合并 + 重启 |
 | `cloud/shrink-memes.py` | 表情包缩图：长边 240px，GIF 逐帧，21.3 MB → 10.3 MB |
+| `cloud/lib/qzone.mjs` | QQ 空间：`get_cookies` → `g_tk`(p_skey) → `send_qzone_msg` / `emotion_cgi_publish_v6` 发说说，`emotion_cgi_msglist_v6` 读动态 |
+| `cloud/lib/semantic.mjs` | 语义记忆 `data/semantic.json`：把看到的事压成一句，私聊 system 里带最近 5 条 |
 | `cloud/remote-deploy-v2.sh` | 服务器侧一键：更新代码 + memes + 合并 `surfaces`/`identity` + 重启 |
+| `cloud/remote-deploy-v4.sh` | 服务器侧一键：v1.3 表情包资格/气泡参数合并 + 重启 |
+| `cloud/remote-deploy-v5.sh` | 服务器侧一键：v1.3 全量参数（含 `qzone` 段）+ 重启 |
+| `cloud/remote-verify-v4.sh` | 服务器侧干净副本验证：拷贝 data/personas/lib → 真打模型 → 打印气泡与带图比例 |
 | `pull-memory.ps1` / `pull-memory.cmd` | 本机拉云端记忆：自动开 ssh -L 隧道再跑 `backup-pull.mjs` |
 | `dist/` | 打包产物（自包含，scp 到服务器即可运行） |
 | `backup-pull.mjs` | 本机侧拉取云端记忆到 `backups/`（开机跑一次） |

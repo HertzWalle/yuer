@@ -89,7 +89,7 @@ sudo docker logs --tail 30 napcat     # 应看到 WebSocket服务: 0.0.0.0:3001 
 node cloud\build.mjs
 
 # 只更新代码时：别覆盖 data/（那里是记忆、人格、心思、承诺）
-tar -czf dist.tgz -C dist $(ls dist | grep -v '^data$')
+tar -czf dist.tgz -C dist --exclude data --exclude logs .
 scp dist.tgz ubuntu@<服务器IP>:/tmp/dist.tgz
 ssh ubuntu@<服务器IP> 'sudo tar -xzf /tmp/dist.tgz -C /opt/dsh-pet && sudo chown -R dshpet:dshpet /opt/dsh-pet/lib /opt/dsh-pet/*.mjs && sudo systemctl restart dsh-pet-bot'
 ```

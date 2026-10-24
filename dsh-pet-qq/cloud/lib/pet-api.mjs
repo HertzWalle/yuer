@@ -18,15 +18,18 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { composeSystemPrompt } from './prompt.mjs';
+import { notesBrief } from './semantic.mjs';
 import { extractChatImage, imageInstruction, limitPool, readMemePool, resolveMemeFile } from './memes.mjs';
 import { chatCompletion } from './llm.mjs';
 import {
   PATHS,
   appendMessages,
+  chatterStats,
   ensureDirs,
   loadMemory,
   loadPet,
   loadState,
+  noteChatter,
   recentMessages as recentFromStore,
   savePet,
   writeSay,
@@ -204,10 +207,55 @@ async function memePoolFor(conf) {
   return limitPool(pool, conf.chatImageLimit ?? 0);
 }
 
+/**
+ * 「这一轮要不要给她配图资格」——骰子在**生成层**掷，不在发送层丢。
+ *
+ * 为什么：以前是每轮都把 54 条表情包清单（约 1.3k token）塞给模型让它挑，
+ * 然后发送层按 35% 概率把挑好的图扔掉 —— 挑完扔 82%，纯浪费输入 token，
+ * 而且模型「被要求挑图」本身就会拉高带图率。现在先决定有没有资格：
+ * 没资格就完全不给清单、不给配图指令。
+ *
+ * 档位：私聊 conf.memeChancePrivate（默认 0.18）、群聊 conf.memeChanceGroup（默认 0.06）；
+ * 冷却：本场景最近 conf.memeCooldown（默认 5）条里带过图就直接不给资格。
+ */
+async function memeGate(conf, kind) {
+  if (conf.memeEnabled === false) return { allow: false, why: 'disabled' };
+  const isGroup = kind === 'group';
+  const keys = isGroup ? ['memeChanceGroup'] : ['memeChancePrivate', 'memeChance'];
+  let chance = NaN;
+  for (const k of keys) {
+    const v = Number(conf[k]);
+    if (Number.isFinite(v)) {
+      chance = v;
+      break;
+    }
+  }
+  if (!Number.isFinite(chance)) chance = isGroup ? 0.06 : 0.18;
+
+  const cdRaw = Math.floor(Number(conf.memeCooldown));
+  const cooldown = Number.isFinite(cdRaw) ? Math.max(0, cdRaw) : 5;
+  if (cooldown > 0) {
+    const stats = await chatterStats(isGroup ? 'group' : 'private', cooldown);
+    if (stats.total > 0 && stats.withImage > 0) return { allow: false, why: 'cooldown' };
+  }
+
+  if (Math.random() >= chance) return { allow: false, why: 'chance' };
+  return { allow: true, why: 'allowed' };
+}
+
+/** 没给清单时模型也可能凭习惯写 `[图:…]`——直接剥掉，别让它出现在消息里 */
+function stripMemeTag(text) {
+  return String(text ?? '')
+    .replace(/\n?\s*\[图[:：]\s*[^\]\n]{1,40}\]\s*$/u, '')
+    .trim();
+}
+
 /** 与人格无关的「打字习惯」硬约束：模型经常忘了字数上限，这句每轮都提醒它 */
 const REPLY_STYLE =
-  '\n\n【回复方式】像在 QQ 上打字：把话分成 1~3 条短消息（用换行隔开），每条尽量 20 字以内；' +
-  '问题再复杂也先说结论，最多 3 条，别写成一大段。';
+  '\n\n【回复方式】像在 QQ 上跟人聊天：' +
+  '想连发就分成 2~4 条短句（用换行隔开，每条尽量 20 字以内）；' +
+  '想一口气说完就整段一条，别为了拆而拆。' +
+  '不管几条，先给结论，别写成公文，也别用列表符号。';
 
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
@@ -222,66 +270,113 @@ function bucketOf(petId, kind, conv) {
 /**
  * 把一条回复拆成「像真人打字那样」的几个气泡。
  *
- * 两条路径：
- * 1. 模型自己用换行/`||` 分好了段——直接采纳（它的分段点通常更自然）；
- * 2. 模型给了一整句——**按概率**在标点处断成 2 段（不是每次都断，否则更假）。
+ * **不写死条数**，按内容决定形态（对着真人聊天记录校准过）：
+ * - 模型自己用换行 / `||` 分好了段 → 直接采纳（它知道自己在说什么，切点比机器自然）；
+ * - 一整句 ≤30 字 → 约 30% 拆两条，其余整条（短句硬拆最假）；
+ * - 30~90 字 → 约 40% **整段一条**（一口气说完那种），60% 拆 2~3 条；
+ * - >90 字 → 默认整段一条，只在句号处切、最多 4 条（碎成八条比长段更像机器人）；
+ * - 软上限 max（默认 6）：超了只合并相邻短句，不做「全塞最后一条」的硬合并；
+ * - 两三个字的「嗯」「好」允许单独成条（真人就是这样）。
  *
- * 无论哪条路径都做同样的收尾：去掉列表符号、丢掉空段、太短的并回上一段、最多 max 段。
+ * bias（0~1，pet.json 的 splitChance）整体调「爱不爱拆」：越大越愿意拆。
  */
-export function splitBubbles(text, { max = 3, chance = 0.5, rng = Math.random } = {}) {
+export function splitBubbles(text, { max = 6, bias = 0.5, rng = Math.random } = {}) {
   const raw = String(text ?? '');
-  let parts = raw
+  let parts = normalizeParts(raw);
+  if (!parts.length) return [];
+
+  if (parts.length === 1) parts = reshapeSingle(parts[0], { bias, rng });
+
+  // 气泡结尾的逗号/分号去掉：真人分两条发时，前一条很少留个「，」吊着
+  parts = parts
+    .map((s, i, arr) => (i === arr.length - 1 ? String(s).trim() : String(s).replace(/[，,、；;：:\s]+$/, '').trim()))
+    .filter(Boolean);
+
+  if (parts.length > max) {
+    // 只削掉多余的那几条：每次合并「最短的相邻一对」，保住原本的分段节奏
+    while (parts.length > max) {
+      let best = 1;
+      let bestLen = Infinity;
+      for (let i = 1; i < parts.length; i += 1) {
+        const len = parts[i - 1].length + parts[i].length;
+        if (len < bestLen) {
+          bestLen = len;
+          best = i;
+        }
+      }
+      parts[best - 1] += parts[best];
+      parts.splice(best, 1);
+    }
+  }
+  return parts;
+}
+
+/** 按换行 / `||` 切段，去掉列表符号与空段、纯标点段 */
+function normalizeParts(raw) {
+  return raw
     .replace(/\\n/g, '\n')
     .split(/\n+|\|\|/)
     .map((s) => s.replace(/^\s*[-*·•]\s*/, '').trim())
     .filter((s) => s && !/^[。！？!?，,、；;…]+$/.test(s));
+}
 
-  if (!parts.length) return [];
+/** 只有一整句时：按长度分档决定摊成几条 */
+function reshapeSingle(one, { bias = 0.5, rng = Math.random } = {}) {
+  const len = one.length;
+  // bias 0.5 → 系数 1；bias 1 → 1.5 倍；bias 0 → 0.5 倍
+  const p = (base) => Math.min(0.95, Math.max(0.05, base * (0.5 + bias)));
 
-  if (parts.length === 1) {
-    const one = parts[0];
-    // 短句不拆：本来一句话就说完的，硬拆反而假
-    if (one.length >= 26 && rng() < chance) {
-      const cut = pickCut(one);
-      if (cut) {
-        const left = one.slice(0, cut).trim();
-        const right = one.slice(cut).replace(/^[。！？!?，,、；;…\s]+/, '').trim();
-        if (left.length >= 5 && right.length >= 4) parts = [left, right];
-      }
+  if (len <= 30) {
+    if (rng() < p(0.3)) {
+      const two = cutInTwo(one);
+      if (two) return two;
     }
+    return [one];
   }
 
-  // 太碎的并回上一段
-  const merged = [];
-  for (const p of parts) {
-    if (merged.length && p.length < 3) merged[merged.length - 1] += p;
-    else merged.push(p);
+  if (len <= 90) {
+    if (rng() < p(0.4)) return [one]; // 长段落模式：一口气说完
+    const n = rng() < 0.55 ? 2 : 3;
+    const chunks = chunkTo(one, n);
+    if (chunks.length > 1) return chunks;
+    return cutInTwo(one) ?? [one];
   }
 
-  // 气泡结尾的逗号/分号去掉：真人分两条发时，前一条很少留个「，」吊着
-  const tidy = merged.map((s, i) =>
-    i === merged.length - 1 ? s.trim() : s.replace(/[，,、；;：:\s]+$/, '').trim(),
-  );
+  // >90：整段一条最像人；只有确实有句读（≥2 个句子收尾）时才切
+  const sentenceCount = (one.match(/[。！？!?；;\n]/g) ?? []).length;
+  if (sentenceCount < 2) return [one];
+  return capParts(sentenceChunks(one, LONG_BUBBLE), 4);
+}
 
-  const kept = tidy.filter((s) => s.length > 0);
+/** 在标点处断成两条；断不开返回 null */
+function cutInTwo(s) {
+  const cut = pickCut(s);
+  if (!cut) return null;
+  const left = s.slice(0, cut).trim();
+  const right = s
+    .slice(cut)
+    .replace(/^[。！？!?，,、；;…\s]+/, '')
+    .trim();
+  if (left.length < 5 || right.length < 2) return null;
+  return [left, right];
+}
 
-  // 一条塞太多字时按句号再切（模型偶尔会忘了字数上限，长段落一条气泡很难读）
-  const expanded = [];
-  for (const s of kept) {
-    if (s.length <= LONG_BUBBLE) {
-      expanded.push(s);
-      continue;
-    }
-    for (const piece of sentenceChunks(s, LONG_BUBBLE)) expanded.push(piece);
-  }
+/** 尽量摊成 n 条：句子够就按句攒，不够再按逗号硬切 */
+function chunkTo(text, n) {
+  const sentences = sentenceChunks(text, LONG_BUBBLE);
+  if (sentences.length >= n) return capParts(sentences, n);
+  const rough = splitRough(text, Math.max(8, Math.ceil(text.length / n)));
+  if (rough.length >= n) return capParts(rough, n);
+  return rough;
+}
 
-  if (expanded.length > max) {
-    const head = expanded.slice(0, max - 1);
-    const tail = expanded.slice(max - 1).join('');
-    head.push(tail.length > HARD_BUBBLE ? clip(tail, HARD_BUBBLE) : tail);
-    return head;
-  }
-  return expanded;
+/** 超过 n 条时，把多出来的并进最后一条（太长就截断） */
+function capParts(parts, n) {
+  if (parts.length <= n) return parts;
+  const head = parts.slice(0, n - 1);
+  const tail = parts.slice(n - 1).join('');
+  head.push(tail.length > HARD_BUBBLE ? clip(tail, HARD_BUBBLE) : tail);
+  return head;
 }
 
 /** 单条气泡的舒适长度 / 拼接后的硬上限 */
@@ -371,14 +466,19 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   const kind = normSurface(surface);
   const bucket = bucketOf(petId, kind, conv);
   const persona = await resolvePersona(surface, petId);
+  // 语义记忆（比如昨天她自己看到的说说）只挂在私聊：群里不需要她汇报私事
+  const background = kind === 'private' ? await notesBrief() : '';
   const system =
     composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
-    REPLY_STYLE;
+    REPLY_STYLE +
+    background;
 
   const rounds = Math.max(1, Math.floor(Number(conf.chatMemoryRounds) || 5));
   const history = await recentFromStore(ENTRY, bucket, rounds * 2);
 
-  const pool = await memePoolFor(conf);
+  // 配图资格：先掷骰子，有资格才把清单交给模型（省 token、也压住带图率）
+  const gate = await memeGate(conf, kind);
+  const pool = gate.allow ? await memePoolFor(conf) : [];
   const messages = [
     { role: 'system', content: system },
     ...history
@@ -393,13 +493,14 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
     return { ok: false, reason: 'generate-error', message: res.message };
   }
 
-  const { text: body, image } = extractChatImage(res.text, pool);
-  const finalText = body.trim() || res.text.trim();
+  const parsed = extractChatImage(res.text, pool);
+  const image = parsed.image;
+  const finalText = (image ? parsed.text : stripMemeTag(parsed.text)).trim() || res.text.trim();
 
-  // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按概率断一次
-  const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(conf.maxBubbles) || 3)));
-  const splitChance = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
-  const segments = splitBubbles(finalText, { max: maxBubbles, chance: splitChance });
+  // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
+  const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(conf.maxBubbles) || 6)));
+  const bias = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
+  const segments = splitBubbles(finalText, { max: maxBubbles, bias });
   const stored = (segments.length ? segments.join(' ') : finalText).trim();
 
   await appendMessages(ENTRY, bucket, [
@@ -407,6 +508,7 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
     { role: 'assistant', content: stored },
   ]);
   await writeSay(petId, image ? { text: stored, image } : { text: stored });
+  await noteChatter(kind, { image: Boolean(image) });
 
   return image
     ? { ok: true, text: stored, segments, image }
@@ -457,4 +559,11 @@ export async function stats() {
     memoryMessages: Array.isArray(messages) ? messages.length : 0,
     dataDir: PATHS.dataDir,
   };
+}
+
+/** /状态 用：本场景最近 20 条里带图多少条 */
+export async function memeStats(surface = 'private') {
+  const kind = surface === 'group' ? 'group' : 'private';
+  const s = await chatterStats(kind, 20);
+  return { kind, total: s.total, withImage: s.withImage, ratio: s.ratio };
 }

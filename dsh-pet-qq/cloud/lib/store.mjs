@@ -25,6 +25,10 @@ export const PATHS = (() => {
     memory: join(dataDir, 'memory.json'),
     state: join(dataDir, 'state.json'),
     groups: join(dataDir, 'groups.json'),
+    /** 最近说过什么（只有 kind/时间/带没带图，不含正文）：表情包冷却与 /状态 用 */
+    chatter: join(dataDir, 'chatter.json'),
+    /** 语义记忆：从外部看到的事（QQ 空间动态等）压成短句，作为聊天背景 */
+    semantic: join(dataDir, 'semantic.json'),
     memesDir: join(dataDir, 'memes'),
     backupsDir: join(dataDir, 'backups'),
   };
@@ -146,6 +150,40 @@ export async function writeSay(petId, data) {
   const counter = Number(cur?.say?.counter) || 0;
   pets[petId] = { ...cur, say: { counter: counter + 1, at: Date.now(), data } };
   await writeJson(PATHS.state, state);
+}
+
+/* ------------------------------- chatter --------------------------------- */
+
+const CHATTER_KEEP = 40;
+
+/** 最近说过的话（只记 kind/at/image，不记正文——不回灌桌面端，也不涉及隐私） */
+export async function loadChatter() {
+  const raw = await readJson(PATHS.chatter, {});
+  const list = Array.isArray(raw?.recent) ? raw.recent : [];
+  return { recent: list.slice(-CHATTER_KEEP) };
+}
+
+/** 记一条「刚说过」：表情包冷却靠它，/状态 的带图比例也靠它 */
+export async function noteChatter(kind, { image = false, at = Date.now() } = {}) {
+  const db = await loadChatter();
+  db.recent.push({ kind: kind === 'group' ? 'group' : 'private', at, image: Boolean(image) });
+  db.recent = db.recent.slice(-CHATTER_KEEP);
+  await writeJson(PATHS.chatter, db);
+  return db;
+}
+
+/** 最近 n 条（按场景过滤）里带图的比例；list 留原始条目给冷却判断用 */
+export async function chatterStats(kind, n = 20) {
+  const db = await loadChatter();
+  const list = db.recent.filter((r) => (kind ? r.kind === kind : true)).slice(-n);
+  const withImage = list.filter((r) => r.image).length;
+  return {
+    total: list.length,
+    withImage,
+    ratio: list.length ? withImage / list.length : 0,
+    lastImageAt: [...list].reverse().find((r) => r.image)?.at ?? null,
+    list,
+  };
 }
 
 /* ------------------------------- backups --------------------------------- */

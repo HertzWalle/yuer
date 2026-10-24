@@ -137,3 +137,45 @@ export async function generateCommitmentMessage({ pet, now = new Date(), history
   }
   return { ok: true, think, say: body, image };
 }
+
+/**
+ * 发一条 QQ 空间说说（纯文字）。
+ *
+ * 和上面两个的区别：说说不是发给某个人的，**是发到朋友圈子里的独白**。
+ * 所以这里额外按两点把关：
+ *  1. 写得像人随手一记，不像营销号（禁话题标签、禁链接、禁「分享」腔）；
+ *  2. 模型自己判断「今天没什么可发的」就 SKIP —— 宁可一天不发，也别发凑数的。
+ *
+ * @returns {Promise<{ok: true, think: string, say: string} | {ok: false, reason: string, message?: string}>}
+ */
+export async function generateMood({ pet, now = new Date(), history = [], mood = {}, maxChars = 80 }) {
+  const system = [
+    baseSystem(pet, now),
+    '',
+    '【你想发一条 QQ 空间说说，纯文字，没有图片。】',
+    `你此刻的状态：${moodWord(mood)}。`,
+    '',
+    '要求：',
+    `- 一句话，不超过 ${maxChars} 字，像随手一记，不是在写文案；`,
+    '- 不要话题标签（#xxx#）、不要链接、不要 @ 任何人；',
+    '- 不要“分享”“记录一下”“今天也要加油”这类套装句；',
+    '- 如果今天真没什么想说的，就 SKIP —— 空间不是打卡。',
+    THINK_SAY_RULE,
+  ].join('\n');
+
+  const msgs = [{ role: 'system', content: system }];
+  for (const m of history.slice(-6)) {
+    if (m && (m.role === 'user' || m.role === 'assistant') && m.content) {
+      msgs.push({ role: m.role, content: String(m.content) });
+    }
+  }
+  msgs.push({ role: 'user', content: '（现在决定发不发。按 JSON 输出。）' });
+
+  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 160 });
+  if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
+
+  const { think, say } = parseThinkSay(res.text);
+  const body = String(say ?? '').trim();
+  if (!body || /^skip$/i.test(body)) return { ok: true, think, say: '' };
+  return { ok: true, think, say: body };
+}

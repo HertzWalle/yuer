@@ -40,6 +40,9 @@ const HELP_TEXT = [
   '/承诺        看她答应过你、还没兑现的事',
   '/安静 [小时] 让她这段时间别主动找你（默认 12 小时）',
   '/说话        解除安静',
+  '/空间        看她 QQ 空间在不在用、今天发没发',
+  '/空间 发 内容 手动发一条纯文字说说（仅主人）',
+  '/空间 关     让她别碰空间（不发也不看），/空间 开 恢复',
   '/ping        测一下我还在不在',
   '其它任何话都会被她当成聊天。',
 ].join('\n');
@@ -217,13 +220,12 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
 
   async function sendReply(msg, reply) {
     const text = String(reply?.text ?? '').trim();
-    // 表情包：先按概率决定要不要带（不必每句都带），再单独发一条，不和文字挤在同一个气泡
-    const chance = Number.isFinite(Number(behavior.memeChance)) ? Number(behavior.memeChance) : 0.35;
-    const wantImage = behavior.sendMeme !== false && Boolean(reply?.image) && Math.random() < chance;
-    const dropped = behavior.sendMeme !== false && Boolean(reply?.image) && !wantImage;
+    // 带不带图**已经在生成层决定过了**（云端大脑只在有资格时才会给出图），
+    // 这里不再掷一次骰子——发送层过滤等于挑完图再扔掉，纯浪费 token。
+    const wantImage = behavior.sendMeme !== false && Boolean(reply?.image);
 
-    // 一条回复拆成几个气泡发（模型自己分好段就用它的分段；没有就一整条）
-    const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(behavior.maxBubbles) || 3)));
+    // 一条回复拆成几个气泡（条数由内容决定，模型自己分好段就用它的分段）
+    const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(behavior.maxBubbles) || 6)));
     const bubbles = (Array.isArray(reply?.segments) && reply.segments.length
       ? reply.segments
       : [text]
@@ -235,13 +237,16 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     let sent = 0;
     for (let i = 0; i < bubbles.length; i += 1) {
       const piece = bubbles[i];
-      // 第一条按「正在输入」延迟；之后每条模拟继续打字——短句快、长句慢，再加一点随机
+      // 第一条按「正在输入」延迟；之后每条模拟继续打字——短句快、长句慢，再加一点随机。
+      // 最后一条如果很短（「嗯」「好」「对了」），多等一会儿：真人补一句前会停一下。
+      const isTail = i === bubbles.length - 1 && i > 0 && piece.length <= 12;
       const wait =
         i === 0
           ? Number(behavior.typingDelayMs) || 0
           : Math.max(0, Number(behavior.bubbleDelayMs) || 700) +
             Math.min(600, piece.length * 22) +
-            Math.random() * 250;
+            Math.random() * 250 +
+            (isTail ? Math.max(0, Number(behavior.tailPauseMs) || 800) : 0);
       if (wait) await new Promise((r) => setTimeout(r, wait));
       const r = await transport.send(msg, [{ type: 'text', data: { text: piece } }]);
       if (r) sent += 1;
@@ -264,8 +269,6 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         await transport.send(msg, [{ type: 'text', data: { text: `（想发「${reply.image}」那张图，但找不到）` } }]);
         sent += 1;
       }
-    } else if (dropped) {
-      log.info(`这条不带图（概率过滤）：${reply.image}`);
     }
 
     if (!sent) {
@@ -355,6 +358,17 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       const priv = byId(surfaces.private ?? null);
       const grp = byId(surfaces.group ?? null);
       const say = state?.pets?.[petId]?.say?.data?.text ?? '（没在说话）';
+      // 带图比例看实际发出去的（chat 后记的 chatter.json），不是配置里的概率
+      let memeLine = behavior.sendMeme === false ? '关' : '开';
+      if (behavior.sendMeme !== false) {
+        try {
+          const api = await import('./lib/pet-api.mjs');
+          const s = typeof api.memeStats === 'function' ? await api.memeStats(msg.kind) : null;
+          if (s && s.total > 0) memeLine = `开（最近 ${s.total} 条里 ${s.withImage} 条带图）`;
+        } catch {
+          /* 本地后端没有 memeStats，跳过 */
+        }
+      }
       await sendText(
         msg,
         [
@@ -362,7 +376,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
           `人格：私聊=${priv ? priv.label : active ? active.label : '未设置'}，群聊=${grp ? grp.label : '跟私聊一样'}`,
           `气泡：${String(say).slice(0, 80)}`,
           `模式：群=${behavior.groupReply ?? 'at'}，私聊=${behavior.privateReply === false ? '关' : '开'}`,
-          `表情包：${behavior.sendMeme === false ? '关' : `约 ${Math.round((Number(behavior.memeChance) || 0.35) * 100)}% 的回复带一张`}`,
+          `表情包：${memeLine}`,
           `统计：收 ${stats.received} / 回 ${stats.replied} / 忽略 ${stats.ignored} / 失败 ${stats.failed}`,
         ].join('\n'),
       );
