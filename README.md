@@ -3,7 +3,7 @@
 给 `dsh-pet`（DeepSeek Harness 的桌宠插件）加上**人格**，再通过 **QQ** 跟她聊天：
 桌面气泡、私聊、群聊共用同一套人设与记忆；云端可以独立跑，本机关机也不影响。
 
-> 当前版本 **v1.0.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
+> 当前版本 **v1.1.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
 
 ## 她现在能做什么
 
@@ -29,7 +29,8 @@
 │   └── docs/            # 云端架构与迁移说明
 ├── persona-dafeiyu/     # DSH 人格卡（可导入 dsh-persona-dafeiyu）+ 提示词分析
 ├── docs/ROADMAP.md      # S0–S5 版本规划
-├── scripts/git-push.mjs # 无 git 二进制时的提交/打标签/推送
+├── scripts/git-push.mjs # 提交/打标签/推送（isomorphic-git，走 github.com）
+├── scripts/push-api.mjs # 同上，但走 api.github.com（github.com 抽风时用）
 ├── CHANGELOG.md
 └── VERSION
 ```
@@ -70,6 +71,7 @@ cp cloud/.env.example cloud/bot.env      # 填 DEEPSEEK_API_KEY / BACKUP_TOKEN
 - `CHANGELOG.md` 按 `vX.Y.Z` 记录；根目录 `VERSION` 是唯一真源。
 - 每个版本打一个 `vX.Y.Z` 标签，提交信息用 `type(scope): 摘要`（feat/fix/docs/chore/refactor）。
 - 这台机器没有 git 二进制，提交/标签/推送走 `node scripts/git-push.mjs`（isomorphic-git）。
+- github.com 的 smart HTTP 抽风（`Request timed out`）时改用 `node scripts/push-api.mjs "提交说明" --tag`：走 `api.github.com` 的 Git Data API，只传差异 blob，标签已存在会自动挪到新提交。
 
 ## 致谢
 
