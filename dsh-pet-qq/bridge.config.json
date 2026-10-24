@@ -18,7 +18,8 @@
     "maxBubbles": 6,
     "bubbleDelayMs": 700,
     "tailPauseMs": 800,
-    "observeGroups": true
+    "observeGroups": true,
+    "quoteReply": "auto"
   },
   "proactive": {
     "enabled": true,

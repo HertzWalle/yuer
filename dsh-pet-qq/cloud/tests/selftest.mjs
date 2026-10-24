@@ -67,10 +67,19 @@ conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001'] };
 const personas = await petApi.loadPersonas(join(DIST, 'personas.json'));
 
 const sent = [];
+const quoted = new Map(); // 被引用消息 id → { sender, message }，供假 get_msg 查
+const calls = [];
 const transport = {
   async send(msg, segments) {
     sent.push({ to: `${msg.kind}:${msg.groupId ?? msg.senderId}`, segments });
     return { message_id: sent.length };
+  },
+  async call(action, params) {
+    calls.push({ action, params });
+    if (action !== 'get_msg') throw new Error(`假 transport 不支持 ${action}`);
+    const hit = quoted.get(String(params.message_id));
+    if (!hit) throw new Error('消息不存在');
+    return { message_id: params.message_id, sender: hit.sender, message: hit.message };
   },
 };
 const quiet = { info() {}, warn() {}, error: (m) => console.log('  ! ' + m) };
@@ -142,6 +151,69 @@ async function main() {
       pieces.map((p) => segText(p.segments)).join(' | '),
     );
     mock.setReplyResolver(null);
+  }
+
+  // 5c 引用回复：别人引用她说过的话再问一句，她要接得上，回的时候也带引用
+  {
+    quoted.set('900', {
+      sender: { user_id: 10000, nickname: '小蓝' },
+      message: [{ type: 'text', data: { text: '你行你上啊' } }],
+    });
+    const n2 = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        message_id: 'quote-1',
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [
+          { type: 'reply', data: { id: '900' } },
+          { type: 'at', data: { qq: '10000', name: '小蓝' } },
+          { type: 'text', data: { text: ' 我真能上吗' } },
+        ],
+      }),
+    );
+    const after = sent.slice(n2);
+    const joined = after.map((x) => segText(x.segments)).join(' ');
+    check(
+      '被引用时把原话喂给模型',
+      joined.includes('引用了你自己刚才说的话') && joined.includes('你行你上啊'),
+      joined.slice(0, 80),
+    );
+    check(
+      '回复带上被回复消息的引用',
+      after[0]?.segments?.[0]?.type === 'reply' && String(after[0].segments[0].data?.id) === 'quote-1',
+      JSON.stringify(after[0]?.segments?.[0] ?? null),
+    );
+    check(
+      '同一条被引消息只查一次 get_msg',
+      calls.filter((c) => c.action === 'get_msg' && String(c.params.message_id) === '900').length === 1,
+      `${calls.filter((c) => c.action === 'get_msg').length} 次`,
+    );
+
+    // 私聊里引用别人说的话：同样接得住，并引用回去
+    quoted.set('901', {
+      sender: { user_id: 20001, nickname: '主人' },
+      message: [{ type: 'text', data: { text: '周末要不要出去走走' } }],
+    });
+    const n3 = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_id: 'quote-2',
+        message: [
+          { type: 'reply', data: { id: '901' } },
+          { type: 'text', data: { text: '你刚才那个建议还作数吗' } },
+        ],
+      }),
+    );
+    const priv = sent.slice(n3);
+    check(
+      '私聊引用也能接住并引用回',
+      priv.map((x) => segText(x.segments)).join(' ').includes('引用了主人') &&
+        priv[0]?.segments?.[0]?.type === 'reply',
+      priv.map((x) => segText(x.segments)).join(' ').slice(0, 60),
+    );
   }
 
   // 6 /人格 列表

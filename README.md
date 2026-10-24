@@ -3,7 +3,7 @@
 给 `dsh-pet`（DeepSeek Harness 的桌宠插件）加上**人格**，再通过 **QQ** 跟她聊天：
 桌面气泡、私聊、群聊共用同一套人设与记忆；云端可以独立跑，本机关机也不影响。
 
-> 当前版本 **v1.4.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
+> 当前版本 **v1.5.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
 
 ## 她现在能做什么
 

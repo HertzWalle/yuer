@@ -3,6 +3,21 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.5.0 — 2026-10-24
+
+会接「引用回复」了：别人引用她说过的话、或者她引用别人的话再问，她都能接住，回的时候也带上引用。
+
+- `feat(bridge)`: `normalizeMessage()` 解析 `reply` 段（数组格式与 `[CQ:reply,id=…]` 兜底），多返回 `quoteId`。
+- `feat(bridge)`: 新增 `quoteOf(msg)`——通过 `transport.call('get_msg')` 取被引用的原话，10 分钟内按 id 缓存、最多 200 条；取不到就安静忽略（不打断回复）。
+- `feat(bridge)`: 新增 `promptInput(msg, quote)`——被引用时模型看到的是
+  `【小明】（引用了你自己刚才说的话：「你行你上啊」）` + 换行 + 正文；引用了别人则显示 `引用了<昵称>的话`。私聊同样生效（只是不带 `【昵称】` 前缀）。
+- `feat(bridge)`: 出站引用——`behavior.quoteReply`（`auto` 默认 / `always` / `off`）。`auto` = 被引用时一定引用回、群里被 @ 也引用（第一条气泡带 `{type:'reply',data:{id}}`，后续气泡接在同一话头上），私聊其余情况不引用。
+- `feat(bridge)`: `segmentsToPlain()` 导出，`get_msg` 的 message 数组 → 纯文本（text/at/image/face）。
+- `feat(bridge)`: `connectOneBot()` 暴露 `call(action, params)`，`start()` 里的 transport 同步透传；没有 `call` 的旧 transport（本机假 transport）会安静跳过引用。
+- `test`: 自测 61/61（新增 4 项：被引用时把原话喂给模型、回复带上被回复消息的引用、同一条被引消息只查一次 `get_msg`、私聊引用也能接住并引用回）。
+- `chore(deploy)`: 新增 `cloud/remote-deploy-v7.sh`（解包 + 只补 `behavior.quoteReply` + 重启 + 代码检查）与 `cloud/tests/probe-quote.mjs`（线上探针，假 transport 带 `call`，真打一次模型验证引用链）。
+
+
 ## v1.4.0 — 2026-10-24
 
 按群换人格 + 指令只认主人 + 群里认得出谁在说话。

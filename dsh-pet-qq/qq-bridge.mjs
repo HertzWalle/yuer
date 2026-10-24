@@ -81,6 +81,20 @@ function makeLogger(tag) {
 
 const sep = (s) => String(s ?? '').trim();
 
+/** get_msg 返回的 message（数组或 CQ 字符串）→ 纯文本，引用回复里显示用 */
+export function segmentsToPlain(segs) {
+  if (!Array.isArray(segs)) return sep(segs).replace(/\s+/g, ' ');
+  const out = [];
+  for (const s of segs) {
+    const d = s?.data ?? {};
+    if (s?.type === 'text') out.push(String(d.text ?? ''));
+    else if (s?.type === 'at') out.push(`@${sep(d.name) || String(d.qq ?? '')}`);
+    else if (s?.type === 'image') out.push('[图片]');
+    else if (s?.type === 'face' || s?.type === 'mface') out.push('[表情]');
+  }
+  return sep(out.join(' ')).replace(/\s+/g, ' ');
+}
+
 /**
  * 把 OneBot 消息事件拍平成 { kind, text, atMe, ... }。
  * 群消息两种回法：at = 被 @ 才回（默认，最不烦人）；all = 群里每条都回。
@@ -94,6 +108,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
   const isGroup = ev.message_type === 'group';
   const segs = Array.isArray(ev.message) ? ev.message : null;
   let atMe = false;
+  let quoteId = '';
   const parts = [];
 
   if (segs) {
@@ -106,10 +121,12 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
         else parts.push(`@${sep(d.name) || String(d.qq)}`);
       } else if (type === 'image') parts.push('[图片]');
       else if (type === 'face' || type === 'mface') parts.push('[表情]');
-      // reply / record / video / file / json / xml 等：不参与对话正文
+      else if (type === 'reply') quoteId = String(d.id ?? '');
+      // record / video / file / json / xml 等：不参与对话正文
     }
   } else if (typeof ev.raw_message === 'string') {
     atMe = new RegExp(`\\[CQ:at,qq=${selfId}(?:,[^\\]]*)?\\]`).test(ev.raw_message);
+    quoteId = /\[CQ:reply,id=(-?\d+)[^\]]*\]/.exec(ev.raw_message)?.[1] ?? '';
     parts.push(
       ev.raw_message
         .replace(/\[CQ:at,[^\]]*\]/g, ' ')
@@ -142,6 +159,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
     senderName,
     groupId: isGroup ? String(ev.group_id) : undefined,
     messageId: String(ev.message_id ?? ''),
+    quoteId,
     atMe,
     observeOnly,
     text,
@@ -179,6 +197,59 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     seen.set(id, now);
     return false;
   };
+
+  /* ----------------------- 引用回复（谁引用了谁的那句话） ----------------------- */
+
+  const quoteCache = new Map(); // 被引用消息 id → { at, name, text, isSelf }
+  const QUOTE_TTL = 10 * 60_000;
+  const clip = (s, n) => (String(s).length > n ? `${String(s).slice(0, n)}…` : String(s));
+
+  /** 消息里带 reply 段时，把被引用的那句话捞出来（get_msg），拿不到就安静地忽略 */
+  async function quoteOf(msg) {
+    const id = String(msg.quoteId ?? '').trim();
+    if (!id) return null;
+    const hit = quoteCache.get(id);
+    if (hit && Date.now() - hit.at < QUOTE_TTL) return hit;
+    if (typeof transport.call !== 'function') return null;
+    let data;
+    try {
+      data = await transport.call('get_msg', { message_id: Number(id) || id });
+    } catch (e) {
+      log.warn(`取被引用的消息失败：${e?.message ?? e}`);
+      return null;
+    }
+    const text = segmentsToPlain(data?.message).slice(0, 200);
+    if (!text) return null;
+    const quote = {
+      at: Date.now(),
+      name: sep(data?.sender?.card) || sep(data?.sender?.nickname) || String(data?.sender?.user_id ?? '某人'),
+      text,
+      isSelf: String(data?.sender?.user_id ?? '') === String(msg.selfId ?? ''),
+    };
+    if (quoteCache.size > 200) quoteCache.clear();
+    quoteCache.set(id, quote);
+    return quote;
+  }
+
+  /**
+   * 模型看到的正文：群里带说话人；有引用就把「被引的那句」写在前面，
+   * 让她知道这句话是在接谁、接哪句，而不是凭空冒出来。
+   */
+  function promptInput(msg, quote) {
+    const who = isOwner(msg.senderId) ? `${msg.senderName}·主人` : msg.senderName;
+    const head = msg.kind === 'group' ? `【${who}】` : '';
+    if (!quote) return `${head}${msg.text}`;
+    const ref = quote.isSelf ? '引用了你自己刚才说的话' : `引用了${quote.name}的话`;
+    return `${head}（${ref}：「${clip(quote.text, 120)}」）\n${msg.text}`;
+  }
+
+  const quoteMode = String(behavior.quoteReply ?? 'auto').toLowerCase();
+  /** 出站要不要带引用：auto = 被引用一定引用回、群里被 @ 也引用；私聊其余情况不引用 */
+  function shouldQuote(msg) {
+    if (quoteMode === 'off' || quoteMode === 'never' || !msg?.messageId) return false;
+    if (quoteMode === 'always' || quoteMode === 'on') return true;
+    return Boolean(msg.quoteId) || (msg.kind === 'group' && msg.atMe);
+  }
 
   const enqueue = (key, fn) => {
     const prev = queues.get(key) ?? Promise.resolve();
@@ -252,7 +323,10 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
             Math.random() * 250 +
             (isTail ? Math.max(0, Number(behavior.tailPauseMs) || 800) : 0);
       if (wait) await new Promise((r) => setTimeout(r, wait));
-      const r = await transport.send(msg, [{ type: 'text', data: { text: piece } }]);
+      // 只有第一条带引用段：后面几条继续接在同一个话头上
+      const segments = [{ type: 'text', data: { text: piece } }];
+      if (i === 0 && shouldQuote(msg)) segments.unshift({ type: 'reply', data: { id: String(msg.messageId) } });
+      const r = await transport.send(msg, segments);
       if (r) sent += 1;
       else {
         log.warn('气泡发送失败，剩下的不发了');
@@ -506,9 +580,9 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
           log.info(`${msg.kind === 'group' ? `群${msg.groupId}` : `私聊${msg.senderId}`} ${msg.senderName}: ${msg.text.slice(0, 120)}`);
         }
 
-        // 群聊里带上说话人（主人单独标一下），单一人格/单一记忆不至于把张三李四搞混
-        const who = isOwner(msg.senderId) ? `${msg.senderName}·主人` : msg.senderName;
-        const input = msg.kind === 'group' ? `【${who}】${msg.text}` : msg.text;
+        // 群聊里带上说话人（主人单独标一下），单一人格/单一记忆不至于把张三李四搞混；
+        // 消息是「引用某句」时，把被引用的原话一并写进去，她才接得上话。
+        const input = promptInput(msg, await quoteOf(msg));
         const capped = input.length > 2000 ? input.slice(0, 2000) : input;
 
         const reply = await chat(capped, { petId, surface: msg.kind, conv });
@@ -620,6 +694,7 @@ function connectOneBot({ conf, onEvent, log }) {
 
   return {
     sendMsg,
+    call: (action, params) => send(action, params),
     start: open,
     stop: () => {
       closedByUs = true;
@@ -658,7 +733,11 @@ export async function start(configPath = DEFAULT_CONFIG_PATH) {
       bridge.handleEvent(ev).catch((e) => log.error(`handleEvent: ${e?.message ?? e}`));
     },
   });
-  const transport = { send: (msg, segments) => onebot.sendMsg(msg, segments) };
+  const transport = {
+    send: (msg, segments) => onebot.sendMsg(msg, segments),
+    // 引用回复要用 get_msg 取被引用的原话（没有这个方法的旧 transport 会安静跳过）
+    call: (action, params) => onebot.call(action, params),
+  };
   const bridge = createBridge({ conf, personas, transport, log });
 
   onebot.start();

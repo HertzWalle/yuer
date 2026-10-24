@@ -124,6 +124,30 @@ ssh ubuntu@124.220.183.169 "cd /tmp && node set-profile.mjs --avatar /tmp/avatar
 - 群里每条消息进模型前都会带上说话人：`【昵称】正文`；主人会额外标成 `【昵称·主人】`。所以同一个群里张三李四说话她分得清，也知道哪句是主人在说。
 - 记忆按群分桶之后，A 群的人不会在 B 群被「认成」熟人。
 
+### 引用回复（接得上「你刚才说的那句」）
+
+QQ 里长按消息「引用」再发一句，是最常见的接话方式。现在两个方向都支持：
+
+- **进**：消息里带 `reply` 段时，桥用 `get_msg` 把被引用的那句原话取回来（10 分钟内同一条只取一次），拼进模型输入——
+  `【小明】（引用了你自己刚才说的话：「你行你上啊」）` + 换行 + 正文。
+  引用的是别人的话就显示 `引用了<昵称>的话`。取不到原话（消息被撤回、权限不够）就安静忽略，只当普通消息处理，不会卡住回复。
+- **出**：`behavior.quoteReply` 控制要不要回带引用，默认 `auto`：
+
+  | 值 | 行为 |
+  |---|---|
+  | `auto`（默认） | 被人引用时一定引用回去；群里被 @ 也引用；私聊其余情况不引用（普通聊天不该每条都像个工单） |
+  | `always` | 每条都带引用 |
+  | `off` | 从不带引用 |
+
+  带引用时只有**第一条气泡**挂 `{type:'reply',data:{id}}`，后面几条接着同一个话头，不会刷出一堆引用框。
+
+线上验证（`cloud/tests/probe-quote.mjs`，服务器副本数据 + 真打一次模型）：
+
+```
+群引用 → {"id":"g-quote-1"} | 来啊，谁怕谁            （回的是「你行你上啊」那句）
+私聊引用 → {"id":"p-quote-1"} | 当然作数              （回的是「周末要不要出去走走」）
+```
+
 人格写在 `personas.json`：`id / label / name / tagline / prompt`。`name` 会改桌宠的显示名，`prompt` 会写进 dsh-pet 的 `whisperPrompt`——**碎碎念和对话共用这一份**，所以每个人格都同时约束了两件事：碎碎念一句 20 字内、正常对话 1~3 句且不超过 80 字、不用 Markdown。
 
 想加新人格：往 `personas.json` 的 `personas` 数组里加一条，`id` 别重复，然后 `node persona.mjs use <新id>` 试一下。
@@ -304,6 +328,8 @@ node cloud/build.mjs
 | `cloud/remote-deploy-v4.sh` | 服务器侧一键：v1.3 表情包资格/气泡参数合并 + 重启 |
 | `cloud/remote-deploy-v5.sh` | 服务器侧一键：v1.3 全量参数（含 `qzone` 段）+ 重启 |
 | `cloud/remote-deploy-v6.sh` | 服务器侧一键：v1.4 按群人格（`surfaces.groups`）+ 重启 |
+| `cloud/remote-deploy-v7.sh` | 服务器侧一键：v1.5 引用回复（补 `behavior.quoteReply`）+ 重启 |
+| `cloud/tests/probe-quote.mjs` | 线上探针：假 transport 带 `call`，验证进出两个方向的引用 |
 | `cloud/remote-verify-v4.sh` | 服务器侧干净副本验证：拷贝 data/personas/lib → 真打模型 → 打印气泡与带图比例 |
 | `pull-memory.ps1` / `pull-memory.cmd` | 本机拉云端记忆：自动开 ssh -L 隧道再跑 `backup-pull.mjs` |
 | `dist/` | 打包产物（自包含，scp 到服务器即可运行） |
