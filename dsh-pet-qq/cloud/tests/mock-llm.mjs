@@ -15,6 +15,7 @@ import { createServer } from 'node:http';
 
 export function startMockLlm({ port = 0 } = {}) {
   let resolveCustom = null;
+  const calls = []; // 每次请求的 messages，方便断言「模型到底看到了什么」
   const server = createServer((req, res) => {
     if (req.method !== 'POST' || !/\/chat\/completions$/.test(req.url || '')) {
       res.writeHead(404).end();
@@ -28,12 +29,15 @@ export function startMockLlm({ port = 0 } = {}) {
         body = JSON.parse(raw);
       } catch {}
       const messages = Array.isArray(body.messages) ? body.messages : [];
+      calls.push({ at: Date.now(), body, messages });
       const user = [...messages].reverse().find((m) => m?.role === 'user');
       const text = String(user?.content ?? '');
       // 去掉配图指令，只回显用户原话
       const clean = text.split('\n\n[配图]')[0].trim();
-      let reply = `（假大脑）我听见了：${clean.slice(0, 40)}`;
-      if (clean.includes('累')) reply += '\n[图:吃白饭的大肥鱼]';
+      // 去掉「谁在说话」这类系统提示行，只回显对话正文（测试断言看的是正文）
+      const plain = clean.replace(/^【群聊】.*$/gm, '').trim();
+      let reply = `（假大脑）我听见了：${plain.slice(0, 40)}`;
+      if (plain.includes('累')) reply += '\n[图:吃白饭的大肥鱼]';
       if (typeof resolveCustom === 'function') {
         const custom = resolveCustom({ messages, user: text });
         if (typeof custom === 'string' && custom) reply = custom;
@@ -55,6 +59,7 @@ export function startMockLlm({ port = 0 } = {}) {
       resolve({
         port: addr.port,
         baseUrl: `http://127.0.0.1:${addr.port}/v1`,
+        calls,
         setReplyResolver: (fn) => {
           resolveCustom = fn;
         },

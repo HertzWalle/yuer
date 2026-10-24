@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 import { PATHS, appendMessages, loadPet } from './store.mjs';
 import { readMemePool, limitPool } from './memes.mjs';
-import { personaFor, recentMessages } from './pet-api.mjs';
+import { personaFor, recentForContext } from './pet-api.mjs';
 import {
   IMPULSE_CAP,
   inQuietHours,
@@ -94,8 +94,6 @@ const QZONE_DEFAULTS = {
 const ENTRY = 'main';
 const pad = (n) => String(n).padStart(2, '0');
 
-/** pet-api 的 recentMessages 在云端返回 {ok,messages}，桌面端返回数组——统一成数组 */
-const historyOf = (r) => (Array.isArray(r) ? r : Array.isArray(r?.messages) ? r.messages : []);
 const clock = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 const dayKey = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 
@@ -178,7 +176,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     if (!due.length) return;
     // 主动消息发给主人（私聊档），所以取私聊的人设
     const ctx = await personaFor('private');
-    const history = historyOf(await recentMessages(petId, 8));
+    const history = await recentForContext(petId, 8);
     const pool = await memePool();
 
     for (const item of due) {
@@ -227,7 +225,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
 
     // 主动消息发给主人（私聊档），所以取私聊的人设
     const ctx = await personaFor('private');
-    const history = historyOf(await recentMessages(petId, 10));
+    const history = await recentForContext(petId, 10);
     const pool = await memePool();
     const lastUser = [...history].reverse().find((m) => m?.role === 'user');
     const hint = lastUser ? `最近主人说过：「${String(lastUser.content).slice(0, 60)}」` : '';
@@ -276,7 +274,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
   /** 从主人的记忆里抠「她熟悉的话题」，用于群里的话题命中加成（10 分钟刷新一次） */
   async function topicKeywords(t) {
     if (t.getTime() - kwCache.at < 10 * 60_000 && kwCache.words.length) return kwCache.words;
-    const hist = historyOf(await recentMessages(petId, 60)).filter((m) => m?.role === 'user');
+    const hist = (await recentForContext(petId, 60)).filter((m) => m?.role === 'user');
     const freq = new Map();
     for (const m of hist) {
       for (const w of String(m.content ?? '').split(/[^\p{Script=Han}A-Za-z0-9]+/u)) {
@@ -490,7 +488,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     if (Number(agency.impulse.owner || 0) < Number(qz.impulseThreshold)) return;
 
     const ctx = await personaFor('private');
-    const history = historyOf(await recentMessages(petId, 8));
+    const history = await recentForContext(petId, 8);
     const maxChars = Number(qz.maxChars) || 90;
     const res = await generateMood({ pet: ctx, now: t, history, mood: agency.mood, maxChars });
     if (!res.ok) {

@@ -51,7 +51,7 @@ const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8')
 // 气泡间隔/尾巴停顿调 0，别让测试干等
 conf.behavior = { ...(conf.behavior || {}), bubbleDelayMs: 0, typingDelayMs: 0, tailPauseMs: 0 };
 // 自测里的「主人」是 20001：指令只有主人能发、按群切人格都要用到它
-conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001'] };
+conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001', '1360153202'] };
 
 // 配图资格现在在生成层掷骰子：自测里百分百给资格、且关掉冷却，否则断言会飘
 {
@@ -72,6 +72,7 @@ const personas = await petApi.loadPersonas(join(DIST, 'personas.json'));
 
 const sent = [];
 const quoted = new Map(); // 被引用消息 id → { sender, message }，供假 get_msg 查
+const members = new Map(); // `${groupId}:${userId}` → { card, nickname }，供假 get_group_member_info 查
 const calls = [];
 const transport = {
   async send(msg, segments) {
@@ -80,6 +81,11 @@ const transport = {
   },
   async call(action, params) {
     calls.push({ action, params });
+    if (action === 'get_group_member_info') {
+      const hit = members.get(`${params.group_id}:${params.user_id}`);
+      if (!hit) throw new Error('群成员不存在');
+      return { group_id: params.group_id, user_id: params.user_id, ...hit };
+    }
     if (action !== 'get_msg') throw new Error(`假 transport 不支持 ${action}`);
     const hit = quoted.get(String(params.message_id));
     if (!hit) throw new Error('消息不存在');
@@ -253,6 +259,70 @@ async function main() {
     );
   }
 
+  // 5e 群里的称呼：群友用群昵称、@QQ号换成群昵称、别把群友叫主人
+  {
+    members.set('888888:1360153202', { card: 'HudsonZephyr', nickname: '主号' });
+    members.set('888888:30001', { card: '搬砖king', nickname: '搬砖' });
+    const n5 = sent.length;
+    const before = mock.calls.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 888888,
+        message_id: 'at-1',
+        user_id: 30001,
+        // 事件里故意不给 card：必须靠 get_group_member_info 拿群昵称
+        sender: { user_id: 30001, nickname: '搬砖' },
+        message: [
+          { type: 'at', data: { qq: '10000' } },
+          { type: 'text', data: { text: ' 锐评一下 ' } },
+          { type: 'at', data: { qq: '1360153202' } },
+        ],
+      }),
+    );
+    const seenUser = String(
+      [...(mock.calls.at(-1)?.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '',
+    );
+    check(
+      '群友的 @QQ号 换成群昵称',
+      seenUser.includes('@HudsonZephyr') && !seenUser.includes('@1360153202'),
+      seenUser.split('\n').slice(-1)[0].slice(0, 60),
+    );
+    check(
+      '群聊说清「你是群友、不是主人」',
+      seenUser.includes('群友「搬砖king」') && seenUser.includes('不是主人') && seenUser.includes('主人是群里的「HudsonZephyr」'),
+      seenUser.split('\n')[0].slice(0, 80),
+    );
+    check('群友不会被标成主人', !seenUser.includes('搬砖king·主人') && sent.length > n5, `新增 ${sent.length - n5} 条`);
+
+    // 主人本人说话：明确标主人
+    const n6 = sent.length;
+    const b6 = mock.calls.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 888888,
+        message_id: 'at-2',
+        user_id: 1360153202,
+        sender: { user_id: 1360153202, card: 'HudsonZephyr' },
+        message: [
+          { type: 'at', data: { qq: '10000' } },
+          { type: 'text', data: { text: ' 在吗' } },
+        ],
+      }),
+    );
+    const ownerSeen = String(
+      [...(mock.calls.at(-1)?.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '',
+    );
+    check(
+      '主人说话时标明是主人',
+      ownerSeen.includes('主人本人') && ownerSeen.includes('HudsonZephyr') && sent.length > n6,
+      ownerSeen.split('\n')[0].slice(0, 60),
+    );
+    void before;
+    void b6;
+  }
+
   // 6 /人格 列表
   await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/人格' } }] }));
   check('/人格 列表面板', segText(last()?.segments ?? '').includes('私聊：') && segText(last()?.segments ?? '').includes('傲娇猫娘'), segText(last()?.segments ?? '').split('\n')[0]);
@@ -356,6 +426,7 @@ async function main() {
 
   await testBubbles();
   await testMemeCooldown();
+  await testPersonaMark();
   await testQzoneHelpers();
   await testFeeds();
   await testSemanticMemory();
@@ -569,6 +640,44 @@ async function testMemeCooldown() {
   check('带图冷却：刚带过图就不给资格', imgs.length === 0, `新增 ${added.length} 条，图 ${imgs.length} 张`);
   check('没资格时 [图:…] 标记被剥掉', text.length > 0 && !text.includes('[图'), text.slice(0, 40));
   mock.setReplyResolver(null);
+}
+
+/* ------------------------- 换人格后的历史隔离（防语气串味） ------------------------- */
+
+async function testPersonaMark() {
+  const petApi = await load('pet-api.mjs');
+  const { sincePersonaMark, PERSONA_MARK_PREFIX } = petApi;
+
+  // 纯函数：只认最后一块界碑
+  const merged = [
+    { role: 'user', content: '你是谁' },
+    { role: 'assistant', content: '大肥鱼？谁呀，姐不认识这人。' },
+    { role: 'user', content: `${PERSONA_MARK_PREFIX}从现在起你是「小蓝」…）`, mark: 'persona', persona: 'xiaolan' },
+    { role: 'user', content: '在吗' },
+    { role: 'assistant', content: '在的呀主人～' },
+  ];
+  const sliced = sincePersonaMark(merged);
+  check(
+    '换身份后历史只留界碑之后',
+    sliced.length === 3 && !sliced.some((m) => /姐不认识/.test(m.content)),
+    `剩 ${sliced.length} 条：${sliced.map((m) => String(m.content).slice(0, 8)).join(' / ')}`,
+  );
+  check('没界碑时历史原样返回', sincePersonaMark(merged.slice(0, 2)).length === 2);
+
+  // 真写一次：给人格切换打界碑（群聊桶）
+  const personas = (await petApi.loadPersonas()).personas ?? [];
+  const lin = personas.find((p) => p.id === 'lin') ?? personas[1];
+  await petApi.applyPersona(lin, { petId: 'main', surface: 'group', conv: 'group:777777' });
+  const mem = JSON.parse(await readFile(join(tmp, 'data', 'memory.json'), 'utf8'));
+  const bucket = mem.main?.['main@group:777777']?.messages ?? [];
+  check(
+    '换人格会在该会话记忆里打界碑',
+    bucket.some((m) => m.mark === 'persona' && String(m.content).includes(lin.name)),
+    `${lin.name}：${bucket.length} 条`,
+  );
+  // 界碑之后喂给模型的历史，起点必须是界碑本身
+  const ctx = await petApi.recentForContext('main', 20, { surface: 'group', conv: 'group:777777' });
+  check('喂模型的历史从界碑开始', ctx.length >= 1 && ctx[0].mark === 'persona', `${ctx.length} 条`);
 }
 
 /* ------------------------- 空间与语义记忆（纯函数） -------------------------- */

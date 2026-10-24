@@ -114,6 +114,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
   let atMe = false;
   let quoteId = '';
   const parts = [];
+  const ats = []; // 这条消息 @ 了谁（qq + 客户端给的名字），群聊里随后换成群昵称
 
   if (segs) {
     for (const s of segs) {
@@ -122,7 +123,12 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
       if (type === 'text') parts.push(String(d.text ?? ''));
       else if (type === 'at') {
         if (String(d.qq) === selfId) atMe = true;
-        else parts.push(`@${sep(d.name) || String(d.qq)}`);
+        else {
+          const qq = String(d.qq ?? '');
+          const name = sep(d.name);
+          ats.push({ qq, name });
+          parts.push(`@${name || qq}`);
+        }
       } else if (type === 'image') parts.push('[图片]');
       else if (type === 'face' || type === 'mface') parts.push('[表情]');
       else if (type === 'reply') quoteId = String(d.id ?? '');
@@ -165,6 +171,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
     messageId: String(ev.message_id ?? ''),
     quoteId,
     atMe,
+    ats,
     observeOnly,
     text,
   };
@@ -235,16 +242,88 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     return quote;
   }
 
+  /* -------------------- 群成员称呼（群昵称，不拿 QQ 号凑数） -------------------- */
+
+  const memberCache = new Map(); // `${groupId}:${userId}` → { at, name }
+  const MEMBER_TTL = 30 * 60_000;
+
+  /** 取群名片（群昵称），取不到退昵称；缓存 30 分钟，避免每条消息都打接口 */
+  async function memberName(groupId, userId) {
+    const gid = String(groupId ?? '');
+    const uid = String(userId ?? '');
+    if (!gid || !uid) return '';
+    const key = `${gid}:${uid}`;
+    const hit = memberCache.get(key);
+    if (hit && Date.now() - hit.at < MEMBER_TTL) return hit.name;
+    if (typeof transport.call !== 'function') return '';
+    let name = '';
+    try {
+      const d = await transport.call('get_group_member_info', {
+        group_id: Number(gid) || gid,
+        user_id: Number(uid) || uid,
+        no_cache: false,
+      });
+      name = sep(d?.card) || sep(d?.nickname) || '';
+    } catch (e) {
+      log.warn(`取群成员昵称失败（群${gid}/${uid}）：${e?.message ?? e}`);
+    }
+    if (memberCache.size > 500) memberCache.clear();
+    memberCache.set(key, { at: Date.now(), name });
+    return name;
+  }
+
+  /** 把消息里的 @QQ号 换成 @群昵称——模型该看到「@HudsonZephyr」，不是「@1360153202」 */
+  async function resolveAtNames(msg) {
+    if (msg.kind !== 'group') return;
+    const list = Array.isArray(msg.ats) ? msg.ats : [];
+    for (const at of list) {
+      if (!at.qq) continue;
+      const name = (await memberName(msg.groupId, at.qq)) || at.name || '';
+      if (!name || name === at.qq) continue;
+      at.resolved = name;
+      msg.text = msg.text.replace(new RegExp(`@${at.qq}(?!\\d)`, 'g'), `@${name}`);
+    }
+  }
+
+  /**
+   * 群聊的「谁在说话」提示：说话人是群友还是主人。
+   * 之前只给个【昵称】，模型会顺着人设把随便哪个群友都叫「主人」——这里把身份说死。
+   */
+  async function groupSpeakerNote(msg) {
+    if (msg.kind !== 'group') return '';
+    const speaker = (await memberName(msg.groupId, msg.senderId)) || msg.senderName;
+    msg.senderName = speaker;
+    const ownerId = [...ownerIds][0] ?? '';
+    if (!ownerId) return `【群聊】说话的是群友「${speaker}」。`;
+    // 主人可能有多个号：优先用「确实在这个群里」的那个的名字
+    let ownerName = '';
+    for (const id of ownerIds) {
+      const n = await memberName(msg.groupId, id);
+      if (n) {
+        ownerName = n;
+        break;
+      }
+    }
+    if (!ownerName) ownerName = (await memberName(msg.groupId, ownerId)) || '主人';
+    if (isOwner(msg.senderId)) return `【群聊】这条是主人本人说的（群里叫「${ownerName}」）。`;
+    return (
+      `【群聊】说话的是群友「${speaker}」，不是主人；主人是群里的「${ownerName}」。` +
+      '别把群友叫成主人，也别拿 QQ 号当名字。'
+    );
+  }
+
   /**
    * 模型看到的正文：群里带说话人；有引用就把「被引的那句」写在前面，
    * 让她知道这句话是在接谁、接哪句，而不是凭空冒出来。
    */
-  function promptInput(msg, quote) {
+  async function promptInput(msg, quote) {
     const who = isOwner(msg.senderId) ? `${msg.senderName}·主人` : msg.senderName;
     const head = msg.kind === 'group' ? `【${who}】` : '';
-    if (!quote) return `${head}${msg.text}`;
-    const ref = quote.isSelf ? '引用了你自己刚才说的话' : `引用了${quote.name}的话`;
-    return `${head}（${ref}：「${clip(quote.text, 120)}」）\n${msg.text}`;
+    const note = await groupSpeakerNote(msg);
+    const body = !quote
+      ? `${head}${msg.text}`
+      : `${head}（${quote.isSelf ? '引用了你自己刚才说的话' : `引用了${quote.name}的话`}：「${clip(quote.text, 120)}」）\n${msg.text}`;
+    return note ? `${note}\n${body}` : body;
   }
 
   const quoteMode = String(behavior.quoteReply ?? 'auto').toLowerCase();
@@ -482,7 +561,9 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         recentMessages(petId, n * 2, { surface: msg.kind, conv }),
         typeof api?.memorySummary === 'function' ? api.memorySummary(petId, { surface: msg.kind, conv }) : null,
       ]);
-      const msgs = Array.isArray(r?.messages) ? r.messages.slice(-n * 2) : [];
+      const msgs = (Array.isArray(r?.messages) ? r.messages.slice(-n * 2) : []).filter(
+        (x) => !String(x?.content ?? '').startsWith('（换身份提示'),
+      );
       const summary = typeof sum?.summary === 'string' ? sum.summary.trim() : '';
       if (!msgs.length && !summary) {
         await sendText(msg, '记忆还是空白的。');
@@ -674,6 +755,8 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
     return enqueue(key, async () => {
       try {
+        // 群里先把 @QQ号 换成群昵称（模型不该看见一串数字）
+        await resolveAtNames(msg);
         // 群里的每条消息都喂给调度器「旁听」：不 @ 她也会攒冲动，由调度器决定要不要插话
         if (msg.kind === 'group' && scheduler?.onGroupMessage) {
           try {
@@ -706,7 +789,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
 
         // 群聊里带上说话人（主人单独标一下），单一人格/单一记忆不至于把张三李四搞混；
         // 消息是「引用某句」时，把被引用的原话一并写进去，她才接得上话。
-        const input = promptInput(msg, await quoteOf(msg));
+        const input = await promptInput(msg, await quoteOf(msg));
         const capped = input.length > 2000 ? input.slice(0, 2000) : input;
 
         const reply = await chat(capped, { petId, surface: msg.kind, conv });

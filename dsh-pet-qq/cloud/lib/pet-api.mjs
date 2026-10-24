@@ -45,6 +45,28 @@ export const TOKEN = '';
 
 const ENTRY = 'main';
 
+/**
+ * 换身份标记：换人格时往该会话的记忆里插一条这样的 user 消息。
+ *
+ * 为什么需要：模型是照着历史对话的语气说话的。群里从「你鱼姐」换成「小蓝」后，
+ * 旧记忆里一堆「姐」的自称会把新人格带跑（实测回了「这 ID 一长串数字，姐看得眼都花了」）。
+ * 所以换人格时打一个界碑，chat() 只取最后一块界碑之后的历史——旧语气不再喂给模型，
+ * 但原文仍完整留在 memory.json 里（/记忆 能翻到）。
+ */
+export const PERSONA_MARK_PREFIX = '（换身份提示：';
+
+/** 从最后一条换身份标记开始截取（标记本身保留，作为给模型的明确提示） */
+export function sincePersonaMark(messages = []) {
+  const list = Array.isArray(messages) ? messages : [];
+  let idx = -1;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const m = list[i];
+    if (m?.mark === 'persona') { idx = i; break; }
+    if (typeof m?.content === 'string' && m.content.startsWith(PERSONA_MARK_PREFIX)) { idx = i; break; }
+  }
+  return idx < 0 ? list : list.slice(idx);
+}
+
 /** 云端配置视图：形状与 dsh-pet 的 GET /config 合并成品一致，桥与 /人格 面板都按它取值 */
 export async function getConfig() {
   const conf = await loadPet();
@@ -208,6 +230,19 @@ export async function applyPersona(persona, { petId = 'main', surface, conv } = 
   const got = await resolvePersona(kind ?? 'any', petId, groupKey);
   const expected = kind === 'group' ? withIdentity(persona.prompt, '') : fullPrompt;
   if (got.prompt !== expected) throw new Error('写入后回读的人设与期望不一致');
+
+  // 打界碑：之后这个会话只按新人设的语气接话，旧语气留在原文里但不喂给模型
+  const bucket = bucketOf(petId, kind === 'group' ? 'group' : 'private', kind === 'group' ? conv : '');
+  await appendMessages(ENTRY, bucket, [
+    {
+      role: 'user',
+      content: `${PERSONA_MARK_PREFIX}从现在起你是「${persona.name || persona.id}」。上面的记录里如果出现别的名字或别的自称（比如「姐」「本鱼」），那是以前的身份，现在只用这个名字、这个语气。其余设定照旧。）`,
+      ts: Date.now(),
+      mark: 'persona',
+      persona: persona.id ?? null,
+    },
+  ]);
+
   return { ok: true, scope: kind === 'group' ? (groupKey ? `group:${groupKey}` : 'group') : kind ?? 'any' };
 }
 
@@ -520,7 +555,7 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
 
   const rounds = Math.max(1, Math.floor(Number(conf.chatMemoryRounds) || 5));
   // 多取一些再交给记忆管理：早期轮次会被压成摘要（L2），摘要落盘、重启不丢
-  const raw = await recentFromStore(ENTRY, bucket, rounds * 6);
+  const raw = sincePersonaMark(await recentFromStore(ENTRY, bucket, rounds * 6));
   const managed = await manageHistory({ bucket, messages: raw, conf });
   const history = managed.messages;
 
@@ -568,6 +603,16 @@ export async function recentMessages(petId = 'main', rounds, { surface = 'privat
   const n = Math.max(0, Math.floor(Number(rounds) || 0));
   const messages = await recentFromStore(ENTRY, bucketOf(petId, normSurface(surface), conv), n);
   return { ok: true, messages };
+}
+
+/**
+ * 喂给模型的历史：只取最后一次换身份之后的片段。
+ * 主动消息、群旁听、空间说说都要用这份，否则旧人格的语气会从历史里漏出来。
+ */
+export async function recentForContext(petId = 'main', rounds = 5, { surface = 'private', conv = '' } = {}) {
+  const n = Math.max(1, Math.floor(Number(rounds) || 5));
+  const raw = await recentFromStore(ENTRY, bucketOf(petId, normSurface(surface), conv), n);
+  return sincePersonaMark(raw);
 }
 
 /** /记忆 用的摘要（L2 压缩产物；没有就空） */

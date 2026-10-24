@@ -76,8 +76,9 @@ export function composeSystemPrompt(parts) {
   const name = String(parts?.name || parts?.id || '');
   const prompt = typeof parts?.prompt === 'string' ? parts.prompt : '';
   // 换人格时旧名字还留在聊天记录里，模型会顺着历史自称旧名字；这句把它钉住。
+  // 「别的自称」也要管：你鱼姐爱说「姐」，切到小蓝后模型会跟着学（实测过）。
   const nameLine = name
-    ? '你的名字是“' + name + '”。聊天记录里如果出现别的名字，那是以前的身份，现在只用这个名字自称。'
+    ? '你的名字是“' + name + '”。聊天记录里如果出现别的名字、或者别的自称（比如“姐”“本鱼”），那是以前的身份，现在只用这个名字和这个语气说话。'
     : '';
   const lines = [prompt, nameLine].filter((line) => line !== '');
   const time = timeContextOf(parts?.now ?? new Date());
