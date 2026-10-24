@@ -24,6 +24,7 @@ export const PATHS = (() => {
     pet: join(dataDir, 'pet.json'),
     memory: join(dataDir, 'memory.json'),
     state: join(dataDir, 'state.json'),
+    groups: join(dataDir, 'groups.json'),
     memesDir: join(dataDir, 'memes'),
     backupsDir: join(dataDir, 'backups'),
   };

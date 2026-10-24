@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 主动性调度器（P1a：承诺兑现 + 私聊主动）。
  *
  * 每 `tickSec` 秒跑一次决策，两件事按优先级：
@@ -31,6 +31,19 @@ import {
 } from './agency.mjs';
 import { dueSoon, extractCommitments, humanTime, loadCommitments, markStatus, openItems } from './commitments.mjs';
 import { generateCommitmentMessage, generateProactive, moodWord } from './proactive.mjs';
+import {
+  GROUP_DEFAULTS,
+  applyAnnoyanceCooldown,
+  canSpeakGroup,
+  decayGroup,
+  groupState,
+  loadGroups,
+  markGroupSpoke,
+  noteGroupMessage,
+  saveGroups,
+  settleAfterSpeak,
+} from './groups.mjs';
+import { draftGroupMessage, scoreChatter } from './group-chat.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -66,9 +79,15 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
   const ownerIds = (p.ownerIds || []).map(String).filter(Boolean);
   const ownerConv = ownerIds.length ? `private:${ownerIds[0]}` : '';
 
+  // 群聊各参数：阈值更高、配额更紧，默认每群每天只说一次
+  const g = { ...GROUP_DEFAULTS, ...(p.group || {}) };
+  const buffers = new Map(); // conv → [{ name, text, at, atBot }]
+  const whitelist = new Set((conf.groupWhitelist || []).map(String).filter(Boolean));
+
   let sender = null;
   let timer = null;
   let warmup = true;
+  let kwCache = { at: 0, words: [] };
 
   function attachSender(fn) {
     sender = fn;
@@ -206,6 +225,157 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     }
   }
 
+  /* ----------------------------- 群聊旁听与插话 ----------------------------- */
+
+  const STOPWORDS = new Set([
+    '我们', '你们', '他们', '这个', '那个', '什么', '怎么', '可以', '就是', '不是', '没有',
+    '觉得', '真的', '现在', '今天', '明天', '一个', '自己', '还是', '这样', '那样', '因为',
+    '所以', '但是', '如果', '已经', '还有', '知道', '一下', '有点', '应该', '可能', '时候',
+  ]);
+
+  /** 从主人的记忆里抠「她熟悉的话题」，用于群里的话题命中加成（10 分钟刷新一次） */
+  async function topicKeywords(t) {
+    if (t.getTime() - kwCache.at < 10 * 60_000 && kwCache.words.length) return kwCache.words;
+    const hist = historyOf(await recentMessages(petId, 60)).filter((m) => m?.role === 'user');
+    const freq = new Map();
+    for (const m of hist) {
+      for (const w of String(m.content ?? '').split(/[^\p{Script=Han}A-Za-z0-9]+/u)) {
+        const x = w.trim();
+        if (x.length < 2 || x.length > 8 || STOPWORDS.has(x)) continue;
+        freq.set(x, (freq.get(x) || 0) + 1);
+      }
+    }
+    const words = [...freq.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 40)
+      .map(([k]) => k);
+    kwCache = { at: t.getTime(), words };
+    return words;
+  }
+
+  /**
+   * 群里来一条消息：进旁听缓冲、加冲动、判反感。不 @ 她的消息也走这里。
+   * 桥对每条群消息都调一次（含自己回复的上下文），所以这里只做记录，不做决策。
+   */
+  async function onGroupMessage({ conv, text, name, atBot = false } = {}) {
+    if (!String(conv || '').startsWith('group:')) return null;
+    const gid = conv.slice('group:'.length);
+    if (whitelist.size && !whitelist.has(gid)) return null;
+
+    const t = now();
+    const buf = buffers.get(conv) || [];
+    buf.push({ name: String(name || '').slice(0, 24), text: String(text || '').slice(0, 200), at: t.getTime(), atBot });
+    const max = Number(g.bufferMax) * 2;
+    if (buf.length > max) buf.splice(0, buf.length - max);
+    buffers.set(conv, buf);
+
+    const db = await loadGroups(t);
+    const words = await topicKeywords(t);
+    const info = noteGroupMessage(db, { conv, text, atBot, now: t, keywords: words, opts: g });
+    const cooldown = applyAnnoyanceCooldown(groupState(db, conv, t), t);
+    await saveGroups(db);
+    if (cooldown) {
+      log.info(`群 ${gid} 反感度 ${Math.round(info.annoyance)}，冷却 ${cooldown}`);
+      await trace({ kind: 'group-cooldown', conv, hours: cooldown, annoyance: Math.round(info.annoyance) });
+    }
+    return info;
+  }
+
+  /**
+   * 群聊插话决策：算门槛 → 旁听评分 → 起草 → 发。
+   * 每个群独立判断，互不影响；全部闸门都在 groups.mjs 里，模型只负责打分和措辞。
+   */
+  async function runGroups(agency, t, dry) {
+    if (g.enabled === false) return;
+    const db = await loadGroups(t);
+    const convs = new Set([...Object.keys(db.groups), ...buffers.keys()]);
+    if (!convs.size) return;
+
+    for (const conv of convs) {
+      const st = groupState(db, conv, t);
+      const level = Number(st.impulse || 0);
+      const active = st.lastMessageAt && t.getTime() - Number(st.lastMessageAt) < 30 * 60_000;
+      decayGroup(st, t, g, { active });
+
+      const afterAnnoy = settleAfterSpeak(st, t);
+      if (afterAnnoy) await trace({ kind: 'group-after-speak', conv, annoyance: Math.round(st.annoyance) });
+      const cooldown = applyAnnoyanceCooldown(st, t);
+      if (cooldown) {
+        await trace({ kind: 'group-cooldown', conv, hours: cooldown, annoyance: Math.round(st.annoyance) });
+        continue;
+      }
+
+      const buf = buffers.get(conv) || [];
+      if (buf.length < Number(g.bufferMin)) continue;
+
+      const gate = canSpeakGroup(db, conv, { now: t, quiet, opts: g });
+      if (!gate.ok) {
+        await trace({ kind: 'group-gate', conv, reason: gate.reason, impulse: Math.round(st.impulse), annoyance: Math.round(st.annoyance) });
+        continue;
+      }
+
+      const ctx = await personaFor('group');
+      const score = await scoreChatter({ ctx, now: t, buffer: buf, group: st, weights: { annoyance: st.annoyance } });
+      if (!score.ok) {
+        await trace({ kind: 'group-score-error', conv, reason: score.reason, message: score.message });
+        continue;
+      }
+      if (score.score < Number(g.scoreMin)) {
+        // 场合不对：扣一点冲动，别让同一个 tick 反复问
+        st.impulse = Math.max(0, Number(st.impulse || 0) - 30);
+        await trace({ kind: 'group-skip', conv, score: score.score, why: score.why, impulse: Math.round(st.impulse) });
+        continue;
+      }
+
+      const draft = await draftGroupMessage({
+        ctx,
+        now: t,
+        buffer: buf,
+        pool: await memePool(),
+        why: score.why,
+        mood: moodWord(agency.mood),
+      });
+      if (!draft.ok) {
+        await trace({ kind: 'group-draft-skip', conv, score: score.score, reason: draft.reason, think: draft.message });
+        continue;
+      }
+
+      const ok = await deliver(conv, { text: draft.say, image: draft.image }, { dry });
+      await trace({
+        kind: 'group-proactive',
+        conv,
+        impulse: Math.round(level),
+        score: score.score,
+        why: score.why,
+        think: draft.think,
+        say: draft.say,
+        sent: Boolean(ok),
+      });
+      if (ok) {
+        markGroupSpoke(db, conv, { now: t, text: draft.say, opts: g });
+        buffers.set(conv, []); // 说过就清空，下一轮重新观察
+        log.info(`群里插了一句（${conv}，评分 ${score.score}）：${String(draft.say).slice(0, 80)}`);
+      }
+    }
+    await saveGroups(db);
+  }
+
+  /** /心思 里的群聊那段 */
+  async function groupLines(t) {
+    const db = await loadGroups(t);
+    const rows = Object.entries(db.groups)
+      .filter(([, v]) => v && Number(v.lastMessageAt || 0) > 0)
+      .sort((a, b) => Number(b[1].lastMessageAt) - Number(a[1].lastMessageAt))
+      .slice(0, 4);
+    if (!rows.length) return [];
+    return rows.map(([conv, v]) => {
+      const gid = conv.slice('group:'.length);
+      const cool = Number(v.cooldownUntil || 0) > t.getTime() ? `，冷却到 ${clock(new Date(v.cooldownUntil))}` : '';
+      const spoke = v.lastSpokeAt ? `，上次开口 ${clock(new Date(v.lastSpokeAt))}` : '';
+      return `群 ${gid}：冲动 ${Math.round(v.impulse || 0)}/${g.threshold}，反感 ${Math.round(v.annoyance || 0)}${cool}${spoke}，今天 ${Number(v.sentToday || 0)}/${g.dailyPerGroup}`;
+    });
+  }
+
   /** 一次完整决策（导出给测试与 CLI 用） */
   async function tick({ dry = false } = {}) {
     const t = now();
@@ -223,6 +393,8 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     } else {
       await runCommitments(agency, t, dry);
       await runImpulse(agency, t, dry);
+      // 群聊独立算账：私聊被暂停/静默不影响群，反之亦然
+      if (!inQuietHours(t, quiet)) await runGroups(agency, t, dry);
     }
 
     warmup = false;
@@ -301,6 +473,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
         next ? `最近一条承诺：${humanTime(next.dueAt, t)} ${next.what}` : '承诺：没有待兑现的',
         isPaused(agency, t) ? `暂停中：到 ${clock(new Date(agency.pausedUntil))} 前不会主动` : '暂停：无',
         agency.misses ? `被冷落：${agency.misses} 次（会让她更谨慎）` : '',
+        ...(await groupLines(t)),
       ].filter(Boolean);
       return lines.join('\n');
     }
@@ -332,5 +505,5 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     return null;
   }
 
-  return { attachSender, start, stop, tick, onInbound, onExchange, command, config: p };
+  return { attachSender, start, stop, tick, onInbound, onExchange, onGroupMessage, command, config: p };
 }

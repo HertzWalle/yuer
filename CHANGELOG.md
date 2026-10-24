@@ -3,6 +3,29 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.2.0 — 2026-10-24
+
+S2 群注意力：群里不 @ 她也会「旁听」，攒够了才决定要不要自己插一句。
+
+- `feat(groups)`: 新增 `cloud/lib/groups.mjs`——每群一套 `impulse / annoyance / lastSpokeAt / sentToday /
+  cooldownUntil`，存 `data/groups.json`；冲动来源 = 每条消息 +2、被 @ +20、话题命中她记得的事 +15、
+  气氛正向 +5；阈值 120、开口一次扣 120、每群每天 1 次、同群间隔 ≥6 小时。
+- `feat(groups)`: 反感度（`annoyance`）按信号累加——显式制止 +30（对着她说 +40）、抱怨/嫌吵 +20、
+  说完 3 分钟内群里冒出 2 句以上却没人接 +10；自然衰减 −2/小时；≥60 立刻冷却 12 小时、≥100 冷却 7 天，
+  冷却期间冲动清零。**反感直接改行为，而不是只写进提示词。**
+- `feat(group-chat)`: 新增 `cloud/lib/group-chat.mjs`——两步走：先让模型当旁观者给「现在插话自不自然」
+  打 0~10 分（低于 `scoreMin=7` 直接放弃并扣 30 冲动），过了再起草 1~2 条短句，支持 `[图:名称]` 与 SKIP。
+- `feat(bridge)`: 群里没 @ 的消息不再直接丢弃——`normalizeMessage(ev, behavior, { observeGroups })`
+  把它们标成 `observeOnly` 交给 `scheduler.onGroupMessage()` 旁听，不回复、不刷日志正文；
+  被 @ 的消息同样喂给旁听（算 +20 冲动）。
+- `feat(scheduler)`: `tick()` 里群聊独立结算（私聊暂停/静默不影响群，反之亦然）；`/心思` 末尾多出
+  每个群的冲动 / 反感 / 冷却 / 今日次数。
+- `feat(config)`: `bridge.config.json` 的 `proactive.group` 一节（阈值、配额、间隔、评分线、加成），
+  `behavior.observeGroups`（默认 true）可整开关掉群旁听。
+- `fix(store)`: `saveGroups()` 里再包一层 `withLock` 会和 `writeJson` 自锁死（自测挂住 5 分钟才发现）——
+  改成直接调 `writeJson`。
+- `chore(build)`: `dist/` 不再携带 `logs/`（上次部署把本机自测的 `trace.jsonl` 带到了线上）。
+- 自测 39/39（新增 6 项：旁听记冲动、冲动够了插话、插话不带 @、同群当天不插第二次、反感冷却、静默不插话）。
 ## v1.1.0 — 2026-10-24
 
 对话节奏：一条回复可以拆成 1~4 个气泡连发，不再永远「一句一气泡」。

@@ -81,7 +81,7 @@ const sep = (s) => String(s ?? '').trim();
  * 把 OneBot 消息事件拍平成 { kind, text, atMe, ... }。
  * 群消息两种回法：at = 被 @ 才回（默认，最不烦人）；all = 群里每条都回。
  */
-export function normalizeMessage(ev, behavior = {}) {
+export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = {}) {
   if (!ev || ev.post_type !== 'message') return null;
   const selfId = String(ev.self_id ?? '');
   const senderId = String(ev.sender?.user_id ?? ev.user_id ?? '');
@@ -117,9 +117,14 @@ export function normalizeMessage(ev, behavior = {}) {
   const senderName = sep(ev.sender?.card) || sep(ev.sender?.nickname) || senderId;
 
   const groupReply = behavior.groupReply ?? 'at';
+  let observeOnly = false;
   if (isGroup) {
     if (groupReply === 'off') return null;
-    if (groupReply === 'at' && !atMe) return null;
+    if (groupReply === 'at' && !atMe) {
+      // 没 @ 她：正常不用回，但可以「旁听」——交给调度器攒冲动，由它决定要不要插话
+      if (!observeGroups) return null;
+      observeOnly = true;
+    }
   } else if (behavior.privateReply === false) {
     return null;
   }
@@ -134,6 +139,7 @@ export function normalizeMessage(ev, behavior = {}) {
     groupId: isGroup ? String(ev.group_id) : undefined,
     messageId: String(ev.message_id ?? ''),
     atMe,
+    observeOnly,
     text,
   };
 }
@@ -386,7 +392,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       if (ev.meta_event_type === 'lifecycle') log.info(`OneBot 就绪：self_id=${ev.self_id} (${ev.sub_type ?? ''})`);
       return null;
     }
-    const msg = normalizeMessage(ev, behavior);
+    const msg = normalizeMessage(ev, behavior, { observeGroups: behavior.observeGroups !== false });
     if (!msg) {
       stats.ignored += 1;
       return null;
@@ -409,6 +415,19 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
     return enqueue(key, async () => {
       try {
+        // 群里的每条消息都喂给调度器「旁听」：不 @ 她也会攒冲动，由调度器决定要不要插话
+        if (msg.kind === 'group' && scheduler?.onGroupMessage) {
+          try {
+            await scheduler.onGroupMessage({ conv, text: msg.text, name: msg.senderName, atBot: msg.atMe });
+          } catch (e) {
+            log.warn(`onGroupMessage：${e?.message ?? e}`);
+          }
+        }
+        if (msg.observeOnly) {
+          stats.ignored += 1;
+          return null;
+        }
+
         await scheduler?.onInbound?.({ conv, text: msg.text });
         if (await handleCommand(msg)) return null;
 

@@ -17,7 +17,8 @@
     "logMessages": true,
     "errorReply": "呜……脑袋卡住了，等我一下下。",
     "maxBubbles": 3,
-    "bubbleDelayMs": 700
+    "bubbleDelayMs": 700,
+    "observeGroups": true
   },
   "proactive": {
     "enabled": true,
@@ -37,7 +38,22 @@
     "minGapMin": 50,
     "recentGuardMin": 20,
     "commitmentLeadMin": 20,
-    "dryRun": false
+    "dryRun": false,
+    "group": {
+      "enabled": true,
+      "ratePerHour": 3,
+      "threshold": 120,
+      "cost": 120,
+      "dailyPerGroup": 1,
+      "minGapHours": 6,
+      "scoreMin": 7,
+      "bufferMin": 3,
+      "bufferMax": 30,
+      "perMessage": 2,
+      "mentionBonus": 20,
+      "topicBonus": 15,
+      "positiveBonus": 5
+    }
   },
   "groupWhitelist": [],
   "userBlacklist": []

@@ -169,7 +169,20 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
 - **答应过的事优先**：聊天里出现「明天九点面试」这类带时间的托付，她会在到点前 20 分钟主动来问结果，不占上面那 5 条配额；连续三次没兑现会记成 missed，之后更谨慎。
 - 每次开口前先写一句 20–40 字的「内心独白」（think），和发出去的话一起进 `/opt/dsh-pet/logs/trace.jsonl`，可以翻账：`sudo tail -f /opt/dsh-pet/logs/trace.jsonl`。当下状态用 `/心思` 看。
 - 觉得吵就 `/安静`（12 小时），`/说话` 立刻恢复。
-- 群聊主动冒泡（P1b）还没做；群聊现在是「被 @ 才回」。
+- 群聊主动冒泡见下一节（S2）：不 @ 她也会旁听，攒够了才偶尔插一句。
+
+### 群里的分寸（S2 群注意力）
+
+群里不 @ 她，她也「在场」——但门槛比私聊高一截，宁可不说也不刷存在感：
+
+- **旁听**：群里每条消息都会进旁听缓冲（`data/groups.json`），普通消息 +2 冲动、被 @ +20、聊到她记得的事 +15、气氛好（哈哈哈/厉害/谢谢）+5。冲动**只在群里有人说话时**才涨，安静一个小时会慢慢回落。
+- **开口门槛**：冲动 ≥ **120**（私聊是 70）；开口一次扣 **120**；**每个群每天最多 1 次**；同群两次之间至少 **6 小时**；23:30–07:30 全体静默。
+- **先打分再说话**：过了门槛还要模型当旁观者打分（0~10，现在插话自不自然），低于 **7** 就不说，并把冲动扣 30（下次别马上又问一遍）。打分理由会带进起草提示词。
+- **反感度是硬开关**：有人明确制止（「别说话」「闭嘴」「消停点」）+30（对着她说 +40）、抱怨/嫌吵 +20、她说完 3 分钟内群里又冒出两句却没人接 +10，每小时自然回落 2。到 60 立刻冷却 12 小时、到 100 冷却 7 天，冷却期冲动清零。**不是写进提示词劝它，而是直接把欲望归零。**
+- **插话不带 @**：模型不 @ 任何人（被点名回答时才是正常回复），所以看起来像群里随口接一句。
+- 想关掉群旁听：`bridge.config.json` 的 `behavior.observeGroups: false`（或 `proactive.group.enabled: false` 只关插话、保留观察）。
+- 想看每个群的账：`/心思` 末尾会列出各群「冲动/120、反感、冷却、今天几次」。翻账：`sudo tail -f /opt/dsh-pet/logs/trace.jsonl`（`group-gate` / `group-skip` / `group-proactive` / `group-cooldown`）。
+- 调参都在 `bridge.config.json` 的 `proactive.group`：`threshold`、`dailyPerGroup`、`minGapHours`、`scoreMin`、`bufferMin`、`perMessage`、`mentionBonus`、`topicBonus`。
 
 ### 谁会被回复
 
@@ -243,6 +256,8 @@ node cloud/build.mjs
 | `cloud/lib/commitments.mjs` | 承诺抽取与到点提醒（`data/commitments.json`） |
 | `cloud/lib/proactive.mjs` | 主动开口 / 兑现承诺的提示词与 `{think,say}` 解析 |
 | `cloud/lib/scheduler.mjs` | 定时 tick + 闸门（静默/日上限/间隔/暂停）+ 决策日志 |
+| `cloud/lib/groups.mjs` | 群聊冲动 / 反感度 / 冷却（`data/groups.json`），全部是硬阈值 |
+| `cloud/lib/group-chat.mjs` | 群聊两步走：旁听打分（0~10）+ 起草一条短句 |
 | `cloud/make-avatar.py` | 生成 dsh大肥鱼 主题头像 `cloud/avatar.png`（Pillow） |
 | `cloud/set-profile.mjs` | 走 OneBot WS 改机器人昵称 / 头像 |
 | `cloud/fetch-memepack.mjs` | 从 jsDelivr CDN 拉 AstrBot 表情包仓库（GitHub 直连只有 7KB/s，CDN 约 1MB/s） |

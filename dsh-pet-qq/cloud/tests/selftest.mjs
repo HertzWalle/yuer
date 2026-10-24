@@ -322,6 +322,116 @@ async function testAgency() {
     const ag = await agencyMod.loadAgency(fakeNow);
     check('主动消息无人回应记一次冷落', ag.misses === 1 && ag.awaiting === null, `misses=${ag.misses}`);
   }
+
+  /* ------------------------- 13. 群聊旁听与插话（S2） ------------------------- */
+
+  const groupsMod = await load('groups.mjs');
+  mock.setReplyResolver(({ messages }) => {
+    const sys = String(messages.find((m) => m.role === 'system')?.content ?? '');
+    const all = messages.map((m) => String(m.content ?? '')).join('\n');
+    if (sys.includes('你在一个 QQ 群里潜水')) return JSON.stringify({ score: 9, why: '在聊她熟的话题' });
+    if (all.includes('现在决定插一句')) return JSON.stringify({ think: '这个我也能接一句', say: '这话我熟，昨天刚被坑过' });
+    return null;
+  });
+
+  const groupEv = (text, { groupId = 9001, name = '小明' } = {}) =>
+    ev({
+      message_type: 'group',
+      group_id: groupId,
+      user_id: 30001,
+      sender: { user_id: 30001, nickname: name, card: name },
+      message: [{ type: 'text', data: { text } }],
+    });
+
+  fakeNow = new Date('2026-10-26T20:10:00+08:00');
+  await setMood({ impulse: { owner: 0 } });
+  {
+    // 清掉历史群状态，从零开始
+    const db = await groupsMod.loadGroups(fakeNow);
+    db.groups = {};
+    await groupsMod.saveGroups(db);
+  }
+
+  // 13.1 群里没 @ 她：不回复，但要旁听下来（攒冲动 + 进缓冲）
+  n = sent.length;
+  for (const t of ['今天库洛这平衡改得也太离谱了', '我血压直接上来了', '谁懂啊']) {
+    await bridge.handleEvent(groupEv(t));
+  }
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g1 = db.groups['group:9001'];
+    check(
+      '群里没 @ 她不回复，但会旁听记下冲动',
+      sent.length === n && !!g1 && Number(g1.impulse) > 0,
+      `impulse=${Math.round(g1?.impulse ?? 0)}`,
+    );
+  }
+
+  // 13.2 冲动攒够 + 评分过关 → 自己插一句（不带 @）
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9001', fakeNow);
+    g.impulse = 130;
+    g.lastMessageAt = fakeNow.getTime();
+    g.lastDecayAt = fakeNow.getTime();
+    g.sentToday = 0;
+    g.lastSpokeAt = 0;
+    g.cooldownUntil = 0;
+    await groupsMod.saveGroups(db);
+  }
+  n = sent.length;
+  await scheduler.tick();
+  {
+    const grp = sent[sent.length - 1];
+    check(
+      '群聊冲动够了会自己插一句',
+      sent.length === n + 1 && grp?.to === 'group:9001' && segText(grp.segments).length > 0,
+      `${grp?.to ?? '-'}：${segText(grp?.segments ?? '').slice(0, 30)}`,
+    );
+    check('群里插话不 @ 任何人', grp ? !grp.segments.some((s) => s.type === 'at') : false);
+  }
+
+  // 13.3 每个群每天只说一次：再 tick 也不会重复插话
+  n = sent.length;
+  await scheduler.tick();
+  check('同一群当天不会插第二次话', sent.length === n);
+
+  // 13.4 群里有人喊「别说话了」→ 反感度累积，到线就自动冷却
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9001', fakeNow);
+    g.impulse = 130;
+    g.annoyance = 70;
+    g.lastMessageAt = fakeNow.getTime();
+    await groupsMod.saveGroups(db);
+  }
+  n = sent.length;
+  await scheduler.tick();
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = db.groups['group:9001'];
+    check(
+      '群里反感度到线就闭嘴冷却',
+      sent.length === n && Number(g.cooldownUntil) > fakeNow.getTime() && Number(g.impulse) === 0,
+      `annoyance=${Math.round(g.annoyance)}，冷却到 ${new Date(Number(g.cooldownUntil)).toLocaleString('zh-CN')}`,
+    );
+  }
+
+  // 13.5 静默时段不插话
+  fakeNow = new Date('2026-10-27T02:00:00+08:00');
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9001', fakeNow);
+    g.impulse = 130;
+    g.annoyance = 0;
+    g.cooldownUntil = 0;
+    g.lastSpokeAt = 0;
+    g.lastMessageAt = fakeNow.getTime();
+    await groupsMod.saveGroups(db);
+  }
+  n = sent.length;
+  await scheduler.tick();
+  check('静默时段群里不插话', sent.length === n);
 }
 
 async function testBackup() {
