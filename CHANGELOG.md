@@ -11,10 +11,11 @@
 - `feat(bridge)`: 新增 `quoteOf(msg)`——通过 `transport.call('get_msg')` 取被引用的原话，10 分钟内按 id 缓存、最多 200 条；取不到就安静忽略（不打断回复）。
 - `feat(bridge)`: 新增 `promptInput(msg, quote)`——被引用时模型看到的是
   `【小明】（引用了你自己刚才说的话：「你行你上啊」）` + 换行 + 正文；引用了别人则显示 `引用了<昵称>的话`。私聊同样生效（只是不带 `【昵称】` 前缀）。
-- `feat(bridge)`: 出站引用——`behavior.quoteReply`（`auto` 默认 / `always` / `off`）。`auto` = 被引用时一定引用回、群里被 @ 也引用（第一条气泡带 `{type:'reply',data:{id}}`，后续气泡接在同一话头上），私聊其余情况不引用。
+- `feat(bridge)`: 出站引用——`behavior.quoteReply`（`auto` 默认 / `always` / `off`）。`auto` = 被引用时一定引用回、群里对她说话时也引用（第一条气泡带 `{type:'reply',data:{id}}`，后续气泡接在同一话头上），私聊其余情况不引用。
+- `fix(bridge)`: QQ 里「引用 + 输入」通常**不带 @**，原来会被当旁听放过去。现在群里只引用她自己说过的话也算在对她说话（`msg.addressedByQuote = true`，日志记一行「引用了她说过的话」）；取不到被引原话就维持旁听，不猜。
 - `feat(bridge)`: `segmentsToPlain()` 导出，`get_msg` 的 message 数组 → 纯文本（text/at/image/face）。
 - `feat(bridge)`: `connectOneBot()` 暴露 `call(action, params)`，`start()` 里的 transport 同步透传；没有 `call` 的旧 transport（本机假 transport）会安静跳过引用。
-- `test`: 自测 61/61（新增 4 项：被引用时把原话喂给模型、回复带上被回复消息的引用、同一条被引消息只查一次 `get_msg`、私聊引用也能接住并引用回）。
+- `test`: 自测 63/63（新增 6 项：被引用时把原话喂给模型、回复带上被回复消息的引用、同一条被引消息只查一次 `get_msg`、私聊引用也能接住并引用回、群里只引用她的话也会回、这种回复也带引用）。
 - `chore(deploy)`: 新增 `cloud/remote-deploy-v7.sh`（解包 + 只补 `behavior.quoteReply` + 重启 + 代码检查）与 `cloud/tests/probe-quote.mjs`（线上探针，假 transport 带 `call`，真打一次模型验证引用链）。
 
 

@@ -244,11 +244,11 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
   }
 
   const quoteMode = String(behavior.quoteReply ?? 'auto').toLowerCase();
-  /** 出站要不要带引用：auto = 被引用一定引用回、群里被 @ 也引用；私聊其余情况不引用 */
+  /** 出站要不要带引用：auto = 被引用一定引用回、群里跟她说话也引用；私聊其余情况不引用 */
   function shouldQuote(msg) {
     if (quoteMode === 'off' || quoteMode === 'never' || !msg?.messageId) return false;
     if (quoteMode === 'always' || quoteMode === 'on') return true;
-    return Boolean(msg.quoteId) || (msg.kind === 'group' && msg.atMe);
+    return Boolean(msg.quoteId) || (msg.kind === 'group' && (msg.atMe || msg.addressedByQuote));
   }
 
   const enqueue = (key, fn) => {
@@ -566,6 +566,16 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
             await scheduler.onGroupMessage({ conv, text: msg.text, name: msg.senderName, atBot: msg.atMe });
           } catch (e) {
             log.warn(`onGroupMessage：${e?.message ?? e}`);
+          }
+        }
+        // 群里没 @ 她、只是引用了她说过的那句话——那也是在跟她说话（QQ 里引用通常不带 @），
+        // 不能当旁听放过去。取不到原话就维持旁听，不猜。
+        if (msg.observeOnly && msg.quoteId) {
+          const q = await quoteOf(msg);
+          if (q?.isSelf) {
+            msg.observeOnly = false;
+            msg.addressedByQuote = true;
+            log.info(`${msg.senderName} 引用了她说过的话，当成本群在对她说话`);
           }
         }
         if (msg.observeOnly) {

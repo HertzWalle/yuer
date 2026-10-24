@@ -216,6 +216,39 @@ async function main() {
     );
   }
 
+  // 5d 群里只引用她的话、没有 @：也算在跟她说话（QQ 里引用一般不带 @）
+  {
+    quoted.set('902', {
+      sender: { user_id: 10000, nickname: '小蓝' },
+      message: [{ type: 'text', data: { text: '机房空调又坏了' } }],
+    });
+    const n4 = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        message_id: 'quote-3',
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [
+          { type: 'reply', data: { id: '902' } },
+          { type: 'text', data: { text: '那你不去修？' } },
+        ],
+      }),
+    );
+    const got = sent.slice(n4);
+    check(
+      '群里只引用她的话也会回（不用 @）',
+      got.length > 0 && got.map((x) => segText(x.segments)).join(' ').includes('机房空调'),
+      got.map((x) => segText(x.segments)).join(' ').slice(0, 60) || '没回',
+    );
+    check(
+      '这种回复也带引用',
+      got[0]?.segments?.[0]?.type === 'reply' && String(got[0].segments[0].data?.id) === 'quote-3',
+      JSON.stringify(got[0]?.segments?.[0] ?? null),
+    );
+  }
+
   // 6 /人格 列表
   await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/人格' } }] }));
   check('/人格 列表面板', segText(last()?.segments ?? '').includes('私聊：') && segText(last()?.segments ?? '').includes('傲娇猫娘'), segText(last()?.segments ?? '').split('\n')[0]);

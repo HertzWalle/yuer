@@ -23,7 +23,7 @@ const personas = await petApi.loadPersonas(join(APP, 'personas.json'));
 const sent = [];
 const quoted = {
   777: { sender: { user_id: 2536561711, nickname: 'dsh大肥鱼·小蓝' }, message: [{ type: 'text', data: { text: '你行你上啊' } }] },
-  778: { sender: { user_id: 1360153202, nickname: 'HudsonZephyr' }, message: [{ type: 'text', data: { text: '周末要不要出去走走' } }] },
+  779: { sender: { user_id: 2536561711, nickname: 'dsh大肥鱼·小蓝' }, message: [{ type: 'text', data: { text: '机房空调又坏了' } }] },  778: { sender: { user_id: 1360153202, nickname: 'HudsonZephyr' }, message: [{ type: 'text', data: { text: '周末要不要出去走走' } }] },
 };
 const transport = {
   async send(msg, segments) {
@@ -84,4 +84,17 @@ console.log('私聊引用 →', JSON.stringify(p.segments[0]?.data), '|', text(p
 
 const okGroup = g.segments[0]?.type === 'reply' && String(g.segments[0].data.id) === 'g-quote-1';
 const okPriv = p.segments[0]?.type === 'reply' && String(p.segments[0].data.id) === 'p-quote-1';
-console.log(okGroup && okPriv ? 'PROBE_OK 引用段都带上了' : 'PROBE_FAIL');
+// 3) 群里只引用她的话、没有 @：也算在跟她说话
+const n3 = sent.length;
+await bridge.handleEvent({
+  ...base,
+  message_id: 'g-quote-2',
+  message: [
+    { type: 'reply', data: { id: '779' } },
+    { type: 'text', data: { text: '那你不去修？' } },
+  ],
+});
+const g2 = sent.slice(n3)[0];
+console.log('群引用无 @ →', g2 ? JSON.stringify(g2.segments[0]?.data) + ' | ' + text(g2.segments).slice(0, 100) : '没回');
+const okNoAt = Boolean(g2) && g2.segments[0]?.type === 'reply' && String(g2.segments[0].data.id) === 'g-quote-2';
+console.log(okGroup && okPriv && okNoAt ? 'PROBE_OK 引用段都带上了（含无 @ 场景）' : 'PROBE_FAIL');
