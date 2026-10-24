@@ -34,3 +34,4 @@ __pycache__/
 *.pyc
 *.log
 .npm-cache/
+dsh-pet-qq/turn.token

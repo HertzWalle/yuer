@@ -77,6 +77,7 @@ const IGNORE_FILES = [
   /^commitments\.json$/,
   /^usage\.jsonl$/,
   /^bot\.env$/,
+  /^turn\.token$/,
 ];
 
 const ignored = (relPath) => {
