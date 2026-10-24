@@ -31,11 +31,12 @@ const DEFAULT_PERSONAS_PATH = join(here, 'personas.json');
 const LOG_DIR = join(here, 'logs');
 
 const HELP_TEXT = [
-  '指令：',
-  '/人格        看有哪几个人格，当前是谁',
-  '/人格 2      切换人格（也可以写 id，比如 /人格 anmiao）',
+  '指令（只有主人发才生效）：',
+  '/人格        看有哪几个人格、私聊/群聊/每个群各是谁',
+  '/人格 2      当前场景换人格：群里只换这个群，私聊换私聊档（也可以写 id，比如 /人格 anmiao）',
+  '/人格 群 1106592574 2   在私聊里给指定群单独换人格',
   '/记忆        看最近几轮记忆',
-  '/状态        看桌宠当前状态',
+  '/状态        看桌宠当前状态（含本群人格）',
   '/心思        看她现在多想说话、心情如何、记着哪些承诺',
   '/承诺        看她答应过你、还没兑现的事',
   '/安静 [小时] 让她这段时间别主动找你（默认 12 小时）',
@@ -161,6 +162,9 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
   const behavior = conf.behavior ?? {};
   const groupWhitelist = new Set((conf.groupWhitelist ?? []).map(String));
   const userBlacklist = new Set((conf.userBlacklist ?? []).map(String));
+  // 指令白名单：只有这些 QQ 号的指令会生效（群里别人发 /人格、/安静 之类一概不认）
+  const ownerIds = new Set((conf.proactive?.ownerIds ?? []).map(String).filter(Boolean));
+  const isOwner = (id) => (ownerIds.size === 0 ? true : ownerIds.has(String(id ?? '')));
   const seen = new Map(); // messageId → ts（去重，OneBot 重连时可能重放）
   const queues = new Map(); // 会话 → Promise 链（同一会话串行，避免并发抢记忆锁）
   let stats = { received: 0, replied: 0, ignored: 0, failed: 0, proactive: 0 };
@@ -281,16 +285,25 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     return sent ? true : null;
   }
 
-  async function personaLine(surface = 'any') {
+  async function personaLine(surface = 'any', conv = '') {
     const { pet, conf } = await getPet(petId);
     const surfaces = conf?.surfaces ?? {};
-    const id = surface === 'group' ? surfaces.group : surface === 'private' ? surfaces.private : null;
+    const groups = surfaces.groups ?? {};
+    const groupKey = surface === 'group' ? String(conv ?? '').replace(/^group:/, '') : '';
+    const id =
+      surface === 'group' && groupKey
+        ? groups[groupKey] ?? surfaces.group
+        : surface === 'group'
+          ? surfaces.group
+          : surface === 'private'
+            ? surfaces.private
+            : null;
     let active = id ? personas.personas.find((p) => p.id === id) ?? null : null;
     if (!active) {
       const prompt = await currentPrompt(petId, 'any');
       active = identify(personas, prompt, pet.name);
     }
-    return { pet, active, surfaces };
+    return { pet, active, surfaces, groups, groupKey };
   }
 
   async function handleCommand(msg) {
@@ -302,36 +315,78 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     // 群聊/私聊各自的记忆桶（/记忆 要用；handleEvent 里的 conv 不在这个作用域）
     const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
 
+    // 指令只认主人（proactive.ownerIds）：群里别人发的 /人格、/安静 之类一律吞掉、不回复
+    if (!isOwner(msg.senderId)) {
+      log.info(`忽略非主人指令：${cmd}（${msg.senderName}/${msg.senderId}，${msg.kind === 'group' ? `群${msg.groupId}` : '私聊'}）`);
+      stats.ignored += 1;
+      return true;
+    }
+
     if (['help', '帮助', '?'].includes(cmd)) {
       await sendText(msg, HELP_TEXT);
       return true;
     }
 
     if (['人格', '人设', 'persona'].includes(cmd)) {
-      if (!arg) {
-        const { active, surfaces } = await personaLine(msg.kind);
-        const byId = (id) => personas.personas.find((p) => p.id === id) ?? null;
-        const priv = byId(surfaces.private ?? null);
-        const grp = byId(surfaces.group ?? null);
-        const lines = [
-          `私聊：${priv ? priv.label : active ? active.label : '未单独设置'}`,
-          `群聊：${grp ? grp.label : '（跟私聊一样）'}`,
-          '',
-          ...personas.personas.map((p, i) => `${i + 1}. ${p.label} —— ${p.tagline}`),
-          '',
-          `发「/人格 2」或「/人格 lin」就在**当前这个${msg.kind === 'group' ? '群' : '私聊'}**里换。`,
-        ];
-        await sendText(msg, lines.join('\n'));
+      // 语法：
+      //   /人格                      → 面板（私聊档 / 群聊默认 / 每个群的单独设置）
+      //   /人格 2                    → 当前会话换（群里=只换这个群，私聊=私聊档）
+      //   /人格 群 <群号> 2          → 在私聊里给指定群换（也可以直接在群里发 /人格 2）
+      //   /人格 群 <群号>            → 看那个群现在是谁
+      const parts = arg.split(/\s+/).filter(Boolean);
+      let groupArg = '';
+      if (parts[0] && ['群', 'qun', 'group'].includes(parts[0].toLowerCase())) {
+        groupArg = String(parts[1] ?? '').trim();
+        parts.splice(0, 2);
+      }
+      if (groupArg && !/^\d{5,}$/.test(groupArg)) {
+        await sendText(msg, '群号得是数字哦，比如：/人格 群 1106592574 2');
         return true;
       }
       const list = personas.personas;
-      const target = /^\d+$/.test(arg) ? list[Number(arg) - 1] : list.find((p) => p.id.toLowerCase() === arg.toLowerCase());
+      const byId = (id) => list.find((p) => p.id === id) ?? null;
+      const targetConv = groupArg ? `group:${groupArg}` : conv;
+
+      if (!parts.length) {
+        const { active, surfaces, groups } = await personaLine(msg.kind, targetConv);
+        const priv = byId(surfaces.private ?? null);
+        const grp = byId(surfaces.group ?? null);
+        const overrides = Object.entries(groups || {})
+          .map(([gid, pid]) => {
+            const p = byId(pid);
+            return `  · 群 ${gid}：${p ? p.label : pid}`;
+          })
+          .sort();
+        const lines = [
+          `私聊：${priv ? priv.label : active ? active.label : '未单独设置'}`,
+          `群聊默认：${grp ? grp.label : '（跟私聊一样）'}`,
+          ...(overrides.length ? ['单独设置的群：', ...overrides] : []),
+        ];
+        if (msg.kind === 'group') {
+          const cur = byId(groups?.[msg.groupId] ?? null) ?? byId(surfaces.group ?? null);
+          lines.splice(2, 0, `本群（${msg.groupId}）：${cur ? cur.label : priv ? priv.label : '跟私聊一样'}`);
+        }
+        lines.push(
+          '',
+          ...list.map((p, i) => `${i + 1}. ${p.label} —— ${p.tagline}`),
+          '',
+          msg.kind === 'group'
+            ? '发「/人格 2」只换这个群；想在私聊里给某个群换：/人格 群 <群号> 2'
+            : '发「/人格 2」换私聊；给某个群单独换：/人格 群 <群号> 2',
+        );
+        await sendText(msg, lines.join('\n'));
+        return true;
+      }
+
+      const want = parts.join(' ');
+      const target = /^\d+$/.test(want) ? list[Number(want) - 1] : byId(want) ?? list.find((p) => p.id.toLowerCase() === want.toLowerCase());
       if (!target) {
         await sendText(msg, `没有这个人格哦，可选：${list.map((p, i) => `${i + 1}=${p.id}`).join('、')}`);
         return true;
       }
-      await applyPersona(target, { petId, surface: msg.kind });
-      const scope = msg.kind === 'group' ? '这个群' : '私聊';
+      const surface = groupArg || msg.kind === 'group' ? 'group' : 'private';
+      await applyPersona(target, { petId, surface, conv: groupArg ? targetConv : msg.kind === 'group' ? conv : undefined });
+      const scope = groupArg ? `群 ${groupArg}` : msg.kind === 'group' ? '这个群' : '私聊';
       log.info(`人格切换 → ${target.id}（${scope}，by ${msg.senderName}/${msg.senderId}）`);
       await sendText(msg, `${scope}换成「${target.name}」了。（${target.tagline}）`);
       return true;
@@ -353,10 +408,11 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     }
 
     if (['状态', 'status'].includes(cmd)) {
-      const [{ pet, active, surfaces }, state] = await Promise.all([personaLine(msg.kind), getState()]);
+      const [{ pet, active, surfaces, groups }, state] = await Promise.all([personaLine(msg.kind, conv), getState()]);
       const byId = (id) => personas.personas.find((p) => p.id === id) ?? null;
       const priv = byId(surfaces.private ?? null);
       const grp = byId(surfaces.group ?? null);
+      const curGroup = msg.kind === 'group' ? byId(groups?.[msg.groupId] ?? null) ?? grp : null;
       const say = state?.pets?.[petId]?.say?.data?.text ?? '（没在说话）';
       // 带图比例看实际发出去的（chat 后记的 chatter.json），不是配置里的概率
       let memeLine = behavior.sendMeme === false ? '关' : '开';
@@ -373,7 +429,8 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         msg,
         [
           `宠物：${pet.name}（${petId}）`,
-          `人格：私聊=${priv ? priv.label : active ? active.label : '未设置'}，群聊=${grp ? grp.label : '跟私聊一样'}`,
+          `人格：私聊=${priv ? priv.label : active ? active.label : '未设置'}，群聊默认=${grp ? grp.label : '跟私聊一样'}`,
+          ...(msg.kind === 'group' ? [`本群：${curGroup ? curGroup.label : '跟群聊默认一样'}`] : []),
           `气泡：${String(say).slice(0, 80)}`,
           `模式：群=${behavior.groupReply ?? 'at'}，私聊=${behavior.privateReply === false ? '关' : '开'}`,
           `表情包：${memeLine}`,
@@ -449,9 +506,9 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
           log.info(`${msg.kind === 'group' ? `群${msg.groupId}` : `私聊${msg.senderId}`} ${msg.senderName}: ${msg.text.slice(0, 120)}`);
         }
 
-        // 群聊里带上说话人，单一人格/单一记忆不至于把张三李四搞混
-        const input =
-          msg.kind === 'group' ? `【${msg.senderName}】${msg.text}` : msg.text;
+        // 群聊里带上说话人（主人单独标一下），单一人格/单一记忆不至于把张三李四搞混
+        const who = isOwner(msg.senderId) ? `${msg.senderName}·主人` : msg.senderName;
+        const input = msg.kind === 'group' ? `【${who}】${msg.text}` : msg.text;
         const capped = input.length > 2000 ? input.slice(0, 2000) : input;
 
         const reply = await chat(capped, { petId, surface: msg.kind, conv });

@@ -82,8 +82,8 @@ export function listPetIds(cfg) {
 }
 
 /** 生效人设：实例级 prompt 优先、回落条目顶层（与 dsh-pet 的 petPersona 同语义） */
-export async function currentPrompt(petId = 'main', surface = 'any') {
-  return (await resolvePersona(surface, petId)).prompt;
+export async function currentPrompt(petId = 'main', surface = 'any', conv = '') {
+  return (await resolvePersona(surface, petId, conv)).prompt;
 }
 
 /* --------------------------- 按会话分人格（群 / 私聊） --------------------------- */
@@ -104,6 +104,11 @@ async function personasList() {
 
 const normSurface = (s) => (s === 'group' || s === 'private' ? s : 'any');
 
+/** `group:1106592574` / `1106592574` → `1106592574`（pet.json 里按群号存） */
+export function groupKeyOf(conv) {
+  return String(conv ?? '').replace(/^group:/, '').trim();
+}
+
 /** pet.json 里的【身份】段（昵称/头像那段）对所有档位都生效，换人格时不能丢 */
 function identityOf(conf) {
   if (typeof conf.identity === 'string' && conf.identity.trim()) return conf.identity;
@@ -120,20 +125,31 @@ const withIdentity = (prompt, identity) => {
 
 /**
  * 这个会话该用哪个人设。
- * pet.json 的 `surfaces = {private:'xiaolan', group:'niyujie'}` 存的是 persona id；
+ * pet.json 的 `surfaces = {private:'xiaolan', group:'niyujie', groups:{'1106592574':'lin'}}`
+ * 存的是 persona id：`groups[群号]` 优先于 `group`，没有单独设置的群用 `group` 当默认。
  * 没配 / 配的 id 不在 personas.json 里 → 退回 pet.name + pet.prompt（桌面端行为不变）。
  * @param {'private'|'group'|'any'} [surface]
+ * @param {string} [petId]
+ * @param {string} [conv] 群会话（`group:<群号>` 或纯群号），用来查按群覆盖
  */
-export async function resolvePersona(surface = 'any', petId = 'main') {
+export async function resolvePersona(surface = 'any', petId = 'main', conv = '') {
   const conf = await loadPet();
   const kind = normSurface(surface);
   // 【身份】是账号层的（头像/昵称），只在私聊档带上；群里「你鱼姐」有自己的设定，塞进去会打架
   const identity = kind === 'group' ? '' : identityOf(conf);
-  const id = kind === 'any' ? null : conf.surfaces?.[kind];
+  const groupKey = kind === 'group' ? groupKeyOf(conv) : '';
+  const perGroup = groupKey ? conf.surfaces?.groups?.[groupKey] : null;
+  const id = kind === 'any' ? null : perGroup || conf.surfaces?.[kind];
   if (id) {
     const hit = (await personasList()).find((p) => p.id === id);
     if (hit) {
-      return { id: hit.id, label: hit.label ?? hit.name, name: hit.name || conf.pet?.name || '小蓝', prompt: withIdentity(hit.prompt, identity) };
+      return {
+        id: hit.id,
+        label: hit.label ?? hit.name,
+        name: hit.name || conf.pet?.name || '小蓝',
+        prompt: withIdentity(hit.prompt, identity),
+        scope: perGroup ? 'group' : kind,
+      };
     }
   }
   return {
@@ -141,17 +157,22 @@ export async function resolvePersona(surface = 'any', petId = 'main') {
     label: null,
     name: conf.pet?.name || '小蓝',
     prompt: withIdentity(conf.pet?.prompt, identity),
+    scope: kind,
   };
 }
 
-/** 给调度器用：主动消息按目标会话取人设 */
-export const personaFor = (surface = 'private') => resolvePersona(surface);
+/** 给调度器用：主动消息按目标会话取人设（群消息要带 conv 才拿得到按群覆盖） */
+export const personaFor = (surface = 'private', conv = '') => resolvePersona(surface, 'main', conv);
 
 /**
- * 换人格：写 pet.name/pet.prompt（无 surface，兼容老调用），或只写某一档
- * `surfaces[surface]`（群里换不影响私聊）。写完回读校验，避免「说换好了其实没落盘」。
+ * 换人格：
+ *  - `surface: 'private'` → 写 `surfaces.private`，同时落 `pet.name/pet.prompt`（桌面气泡跟着变）
+ *  - `surface: 'group'` + `conv` → 写 `surfaces.groups[群号]`（只影响这一个群）
+ *  - `surface: 'group'` 不带 conv → 写 `surfaces.group`（所有群的默认，兼容老调用）
+ *  - 不带 surface → 写 `pet.*`（老行为）
+ * 写完回读校验，避免「说换好了其实没落盘」。
  */
-export async function applyPersona(persona, { petId = 'main', surface } = {}) {
+export async function applyPersona(persona, { petId = 'main', surface, conv } = {}) {
   if (!persona || typeof persona.prompt !== 'string' || !persona.prompt.trim()) {
     throw new Error('人格数据不完整（缺 prompt）');
   }
@@ -159,13 +180,16 @@ export async function applyPersona(persona, { petId = 'main', surface } = {}) {
   if ((conf.pet?.id || 'main') !== petId) throw new Error(`没有这只桌宠：${petId}`);
 
   const kind = surface === 'group' || surface === 'private' ? surface : null;
+  const groupKey = kind === 'group' ? groupKeyOf(conv) : '';
   const identity = identityOf(conf);
   const fullPrompt = withIdentity(persona.prompt, identity);
   const surfaces = { ...(conf.surfaces || {}) };
   let pet = { ...conf.pet, id: petId };
   let active = conf.active ?? null;
 
-  if (kind) {
+  if (kind === 'group' && groupKey) {
+    surfaces.groups = { ...(surfaces.groups || {}), [groupKey]: persona.id ?? null };
+  } else if (kind) {
     surfaces[kind] = persona.id ?? null;
     // 私聊档同时落到 pet.*，这样桌面气泡、/人格 面板、未指定 surface 的调用都看到同一份
     if (kind === 'private') {
@@ -180,9 +204,10 @@ export async function applyPersona(persona, { petId = 'main', surface } = {}) {
   const next = { ...conf, active, surfaces, identity, pet };
   await savePet(next);
 
-  const got = await resolvePersona(kind ?? 'any', petId);
-  if (got.prompt !== fullPrompt) throw new Error('写入后回读的人设与期望不一致');
-  return { ok: true };
+  const got = await resolvePersona(kind ?? 'any', petId, groupKey);
+  const expected = kind === 'group' ? withIdentity(persona.prompt, '') : fullPrompt;
+  if (got.prompt !== expected) throw new Error('写入后回读的人设与期望不一致');
+  return { ok: true, scope: kind === 'group' ? (groupKey ? `group:${groupKey}` : 'group') : kind ?? 'any' };
 }
 
 /** 由 prompt/名字反推是哪个内置人格（与本地 pet-api 的 identify 同一策略） */
@@ -465,7 +490,7 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   const conf = await loadPet();
   const kind = normSurface(surface);
   const bucket = bucketOf(petId, kind, conv);
-  const persona = await resolvePersona(surface, petId);
+  const persona = await resolvePersona(surface, petId, conv);
   // 语义记忆（比如昨天她自己看到的说说）只挂在私聊：群里不需要她汇报私事
   const background = kind === 'private' ? await notesBrief() : '';
   const system =

@@ -3,6 +3,19 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.4.0 — 2026-10-24
+
+按群换人格 + 指令只认主人 + 群里认得出谁在说话。
+
+- `feat(persona)`: `pet.json` 的 `surfaces` 新增 `groups`（`{"1106592574":"zhixia"}`）。解析顺序：`groups[群号]` → `group`（群默认）→ `pet.prompt`；`resolvePersona(surface, petId, conv)`、`currentPrompt(..., conv)`、`chat({conv})`、`personaFor(surface, conv)` 都带上会话，**群聊主动冒泡也按群取人设**（`scheduler.runGroups` 传 `conv`）。
+- `feat(persona)`: `applyPersona(persona, {surface:'group', conv})` 写 `surfaces.groups[群号]`，只影响那个群；不带 conv 仍写群默认（兼容老调用），私聊档同时落在 `pet.name/pet.prompt`。
+- `feat(bridge)`: 指令权限——`proactive.ownerIds` 之外的任何人发 `/xxx` 一律吞掉（不回复、不改配置，日志记「忽略非主人指令」）；主人集合为空时退回不设限（兼容旧配置）。
+- `feat(bridge)`: `/人格 群 <群号> <序号|id>` 可在私聊里远程给指定群换人格；`/人格 群 <群号>` 只看那个群；`/人格` 面板多出「本群」「单独设置的群」；`/状态` 在群里多一行「本群：…」。
+- `feat(bridge)`: 群里每条消息进模型前带说话人 `【昵称】`，主人额外标 `【昵称·主人】`，同群多人对话不再混成一团。
+- `fix(config)`: 仓库里的 `cloud/data/pet.json` 缺 `surfaces` 默认值，导致群聊回落到 `pet.prompt`（群里会用小蓝的语气）→ 补上 `{"private":"xiaolan","group":"niyujie","groups":{}}`。
+- `test`: 自测 57/57（新增 5 项：私聊里给指定群换人格、回执带群号、群里换只影响本群、群里非主人指令被忽略、私聊里非主人指令被忽略）。
+
+
 ## v1.3.0 — 2026-10-24
 
 更像真人、也更省 token：表情包改成「先决定要不要配图」，气泡条数改由内容决定，并给她加上 QQ 空间（看动态 + 每天最多一条说说）。

@@ -351,7 +351,7 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
         continue;
       }
 
-      const ctx = await personaFor('group');
+      const ctx = await personaFor('group', conv);
       const score = await scoreChatter({ ctx, now: t, buffer: buf, group: st, weights: { annoyance: st.annoyance } });
       if (!score.ok) {
         await trace({ kind: 'group-score-error', conv, reason: score.reason, message: score.message });

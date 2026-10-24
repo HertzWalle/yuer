@@ -47,6 +47,8 @@ const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href
 const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8'));
 // 气泡间隔/尾巴停顿调 0，别让测试干等
 conf.behavior = { ...(conf.behavior || {}), bubbleDelayMs: 0, typingDelayMs: 0, tailPauseMs: 0 };
+// 自测里的「主人」是 20001：指令只有主人能发、按群切人格都要用到它
+conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001'] };
 
 // 配图资格现在在生成层掷骰子：自测里百分百给资格、且关掉冷却，否则断言会飘
 {
@@ -177,6 +179,71 @@ async function main() {
   // 11 /ping
   await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/ping' } }] }));
   check('/ping → pong', segText(last()?.segments ?? '') === 'pong');
+
+  // 11b 在私聊里给指定群换人格（只影响那个群）
+  {
+    await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/人格 群 555555 3' } }] }));
+    const onDisk = JSON.parse(await readFile(join(tmp, 'data', 'pet.json'), 'utf8'));
+    const g = await petApi.resolvePersona('group', 'main', 'group:555555');
+    const priv = await petApi.resolvePersona('private', 'main');
+    check(
+      '私聊里给指定群换人格',
+      onDisk.surfaces?.groups?.['555555'] === 'lin' && g.name === '凛' && priv.name === '阿喵',
+      `群555555=${g.name} 私聊=${priv.name}`,
+    );
+    check('回执说明改的是哪个群', segText(last()?.segments ?? '').includes('555555'), segText(last()?.segments ?? '').slice(0, 40));
+  }
+
+  // 11c 群里 /人格 只换当前群，不动默认与私聊
+  {
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 555555,
+        user_id: 20001,
+        sender: { user_id: 20001, nickname: '主人' },
+        message: [
+          { type: 'at', data: { qq: '10000', name: '小蓝' } },
+          { type: 'text', data: { text: ' /人格 2' } },
+        ],
+      }),
+    );
+    const onDisk = JSON.parse(await readFile(join(tmp, 'data', 'pet.json'), 'utf8'));
+    const inGroup = await petApi.resolvePersona('group', 'main', 'group:555555');
+    const other = await petApi.resolvePersona('group', 'main', 'group:999999');
+    check(
+      '群里换人格只影响本群',
+      onDisk.surfaces?.groups?.['555555'] === 'anmiao' && inGroup.name === '阿喵' && other.name !== '阿喵',
+      `本群=${inGroup.name} 其它群=${other.name}`,
+    );
+  }
+
+  // 11d 别人发的指令不生效（不回复、不改任何配置）
+  {
+    const before = JSON.parse(await readFile(join(tmp, 'data', 'pet.json'), 'utf8'));
+    const n = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [
+          { type: 'at', data: { qq: '10000', name: '小蓝' } },
+          { type: 'text', data: { text: ' /人格 1' } },
+        ],
+      }),
+    );
+    const after = JSON.parse(await readFile(join(tmp, 'data', 'pet.json'), 'utf8'));
+    check(
+      '非主人指令被忽略',
+      sent.length === n && JSON.stringify(before.surfaces) === JSON.stringify(after.surfaces),
+      `新增 ${sent.length - n} 条`,
+    );
+    const n2 = sent.length;
+    await bridge.handleEvent(ev({ user_id: 20123, sender: { user_id: 20123, nickname: '路人' }, message: [{ type: 'text', data: { text: '/安静 1' } }] }));
+    check('私聊里非主人指令也被忽略', sent.length === n2, `新增 ${sent.length - n2} 条`);
+  }
 
   await testBubbles();
   await testMemeCooldown();

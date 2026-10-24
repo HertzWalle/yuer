@@ -81,5 +81,10 @@
     "maxChars": 90,
     "dryRun": true,
     "maxFails": 3
+  },
+  "surfaces": {
+    "private": "xiaolan",
+    "group": "niyujie",
+    "groups": {}
   }
 }
