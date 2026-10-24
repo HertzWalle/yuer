@@ -3,6 +3,12 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.0.1 — 2026-10-24
+
+- ix(scripts): scripts/git-push.mjs 推送时补上 isomorphic-git 的 Node http 客户端（否则报
+  The function requires a "http" parameter）。
+- 首次推送时远端由一个 Initial commit 占位，本地三条提交通过重排父指针接到它后面（保留远端历史，
+  且为 fast-forward），1.0.0 标签随之重指。
 ## v1.0.0 — 2026-10-24（首个公开快照）
 
 把四个阶段的工作收进仓库，作为后续 S0–S5 的基线。

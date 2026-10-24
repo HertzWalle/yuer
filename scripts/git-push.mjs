@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import git from 'isomorphic-git';
+import http from 'isomorphic-git/http/node';
 
 const DIR = process.cwd();
 const AUTHOR = {
@@ -119,12 +120,13 @@ async function doPush() {
   }
   await git.addRemote({ fs, dir: DIR, remote, url });
   const onAuth = () => ({ username: 'x-access-token', password: token });
-  await git.push({ fs, dir: DIR, remote, ref: BRANCH, onAuth, force: false });
+  await git.push({ fs, http, dir: DIR, remote, ref: BRANCH, onAuth, force: false });
   log(`✓ push ${BRANCH}`);
   const tags = await git.listTags({ fs, dir: DIR });
   for (const tag of tags) {
     await git.push({
       fs,
+      http,
       dir: DIR,
       remote,
       ref: `refs/tags/${tag}`,
