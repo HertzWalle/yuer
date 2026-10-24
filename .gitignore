@@ -1,0 +1,36 @@
+# ── 依赖与构建产物 ─────────────────────────────────────────────
+node_modules/
+dsh-pet-qq/dist/
+dsh-pet-qq/napcat/
+dsh-pet-qq/downloads/
+
+# ── 运行时数据与日志（体积大 / 每台机器不同）─────────────────────
+dsh-pet-qq/logs/
+dsh-pet-qq/backups/
+dsh-pet-qq/cloud/data/memes/
+dsh-pet-qq/cloud/data/memory.json
+dsh-pet-qq/cloud/data/memory.json.bak*
+dsh-pet-qq/cloud/data/state.json
+dsh-pet-qq/cloud/data/commitments.json
+dsh-pet-qq/cloud/data/usage.jsonl
+dsh-pet-qq/cloud/data/*.broken-*
+dsh-pet-qq/cloud/.runtime-*.json
+dsh-pet-qq/.tmp-*
+dsh-pet-qq/cloud/.tmp-*
+
+# ── 机密：永远不要提交 ───────────────────────────────────────
+.env
+.env.local
+*.pem
+*.key
+dsh-pet-qq/cloud/bot.env
+dsh-pet-qq/.ssh/
+dsh-pet-qq/server.pem
+
+# ── 系统垃圾 ────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+__pycache__/
+*.pyc
+*.log
+.npm-cache/

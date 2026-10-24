@@ -1,0 +1,18 @@
+{
+  "name": "dsh-pet-qq",
+  "version": "1.0.0",
+  "private": true,
+  "description": "给 dsh-pet 加人格，并通过 QQ 与她聊天（云端可常驻）",
+  "type": "module",
+  "scripts": {
+    "status": "node scripts/git-push.mjs status",
+    "commit": "node scripts/git-push.mjs commit",
+    "release": "node scripts/git-push.mjs release",
+    "push": "node scripts/git-push.mjs push",
+    "selftest": "node dsh-pet-qq/cloud/tests/selftest.mjs",
+    "bridge-test": "node dsh-pet-qq/test-bridge.mjs"
+  },
+  "devDependencies": {
+    "isomorphic-git": "^1.33.1"
+  }
+}
