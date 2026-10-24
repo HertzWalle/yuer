@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * dsh-pet ⇄ QQ 桥（OneBot v11 正向 WebSocket 客户端）。
  *
@@ -216,11 +216,33 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     const wantImage = behavior.sendMeme !== false && Boolean(reply?.image) && Math.random() < chance;
     const dropped = behavior.sendMeme !== false && Boolean(reply?.image) && !wantImage;
 
+    // 一条回复拆成几个气泡发（模型自己分好段就用它的分段；没有就一整条）
+    const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(behavior.maxBubbles) || 3)));
+    const bubbles = (Array.isArray(reply?.segments) && reply.segments.length
+      ? reply.segments
+      : [text]
+    )
+      .map((s) => String(s).trim())
+      .filter(Boolean)
+      .slice(0, maxBubbles);
+
     let sent = 0;
-    if (text) {
-      if (behavior.typingDelayMs) await new Promise((r) => setTimeout(r, behavior.typingDelayMs));
-      const r = await transport.send(msg, [{ type: 'text', data: { text } }]);
+    for (let i = 0; i < bubbles.length; i += 1) {
+      const piece = bubbles[i];
+      // 第一条按「正在输入」延迟；之后每条模拟继续打字——短句快、长句慢，再加一点随机
+      const wait =
+        i === 0
+          ? Number(behavior.typingDelayMs) || 0
+          : Math.max(0, Number(behavior.bubbleDelayMs) || 700) +
+            Math.min(600, piece.length * 22) +
+            Math.random() * 250;
+      if (wait) await new Promise((r) => setTimeout(r, wait));
+      const r = await transport.send(msg, [{ type: 'text', data: { text: piece } }]);
       if (r) sent += 1;
+      else {
+        log.warn('气泡发送失败，剩下的不发了');
+        break;
+      }
     }
 
     if (wantImage) {
@@ -268,6 +290,8 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     if (!m) return false;
     const cmd = m[1].toLowerCase();
     const arg = m[2].trim();
+    // 群聊/私聊各自的记忆桶（/记忆 要用；handleEvent 里的 conv 不在这个作用域）
+    const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
 
     if (['help', '帮助', '?'].includes(cmd)) {
       await sendText(msg, HELP_TEXT);

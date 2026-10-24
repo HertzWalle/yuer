@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /**
  * 云端包的离线自测：**不碰 QQ、不碰真实 LLM**。
  *
@@ -45,8 +45,8 @@ const { createBridge } = await import(pathToFileURL(join(DIST, 'qq-bridge.mjs'))
 const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href);
 
 const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8'));
-// 自测里把带图概率固定成 100%，否则 35% 的随机会让断言飘
-conf.behavior = { ...(conf.behavior || {}), memeChance: 1 };
+// 自测里把带图概率固定成 100%，否则 35% 的随机会让断言飘；气泡间隔调 0，别让测试等
+conf.behavior = { ...(conf.behavior || {}), memeChance: 1, bubbleDelayMs: 0, typingDelayMs: 0 };
 const personas = await petApi.loadPersonas(join(DIST, 'personas.json'));
 
 const sent = [];
@@ -112,6 +112,20 @@ async function main() {
   // 5 表情包（假大脑对含「累」的话会附 [图:…]，应解析成 image 段）
   const imgMsg = lastWith('image');
   check('表情包按 [图:名称] 单独成一条发送', Boolean(imgMsg) && imgMsg.segments.length === 1 && imgMsg.segments[0].type === 'image', imgMsg ? '独立 image 消息' : '没发图');
+
+  // 5b 多气泡：模型自己用换行分段时，应发成多条独立文字消息
+  {
+    mock.setReplyResolver(() => '在呢。\n刚躺下，正想跟你说晚安');
+    const n2 = sent.length;
+    await bridge.handleEvent(ev({ message_id: 'bubble-1', message: [{ type: 'text', data: { text: '你在干嘛呀' } }] }));
+    const pieces = sent.slice(n2).filter((x) => x.segments.some((s) => s.type === 'text'));
+    check(
+      '模型分段时发成多个气泡',
+      pieces.length === 2 && segText(pieces[0].segments).includes('在呢') && segText(pieces[1].segments).includes('刚躺下'),
+      pieces.map((p) => segText(p.segments)).join(' | '),
+    );
+    mock.setReplyResolver(null);
+  }
 
   // 6 /人格 列表
   await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/人格' } }] }));

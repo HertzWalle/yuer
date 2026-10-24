@@ -203,6 +203,17 @@ node cloud/build.mjs
 
 分类英文 key 到中文名的映射在 `cloud/import-memes.mjs` 顶部的 `LABELS`；manifest 里有几个 key 带零宽字符，脚本已按清洗后的 key 匹配。
 
+### 对话节奏（像真人那样连发几条）
+
+以前不管说什么都只回一条，像客服。现在一条回复可以被拆成 **1~4 个气泡**，中间隔着「继续打字」的停顿：
+
+- 模型侧：`cloud/lib/pet-api.mjs` 在 system 末尾追加 `REPLY_STYLE`——「像在 QQ 上打字：分 1~3 条短消息（换行隔开），每条尽量 20 字以内，问题再复杂也先说结论」；`personas.json` 每个人格的【输出格式】也补了同样要求。
+- 拆分侧：`splitBubbles(text, {max, chance})` 两条路径——模型自己用换行/`||` 分好的直接采纳；模型只给一整句时，**按概率**（`pet.json` 的 `splitChance`，默认 `0.5`）在标点处断一次，短句（<26 字）不拆。
+- 收尾规则：去掉列表符号；前几条结尾的「，」「；」会被剥掉（真人分两条发时很少留个逗号吊着）；某条超过 70 字会按句号再切；最后一条拼起来超过 90 字会在标点处截断加「…」。
+- 发送侧：`qq-bridge.mjs` 的 `sendReply` 逐条发——第一条等 `typingDelayMs`（默认 300ms），之后每条 `bubbleDelayMs`（默认 700ms）+ 字数×22ms（上限 600）+ 0~250ms 随机，短句快、长句慢。
+- 调参：`bridge.config.json` 的 `behavior.maxBubbles`（最多几条，默认 3）、`behavior.bubbleDelayMs`；`cloud/data/pet.json` 的 `maxBubbles` / `splitChance`。想要更话痨就把 `splitChance` 调到 0.8，想要一条说完就调到 0.2。
+- 记忆里存的是拼起来的一整段（`segments.join(' ')`），所以下次读历史不会碎成一堆短句。
+
 ## 文件
 
 | 文件 | 作用 |

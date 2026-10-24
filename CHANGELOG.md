@@ -3,6 +3,22 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.1.0 — 2026-10-24
+
+对话节奏：一条回复可以拆成 1~4 个气泡连发，不再永远「一句一气泡」。
+
+- eat(pet-api): 新增 splitBubbles()——模型用换行/|| 自己分段时直接采纳；只给一整句时按
+  splitChance（默认 0.5）在标点处断一次，短句（<26 字）不拆；剥掉前几条结尾的逗号/分号；
+  单条 >70 字按句号再切；末尾拼接超过 90 字在标点处截断加「…」。
+- eat(pet-api): system 末尾追加 REPLY_STYLE 打字约束（1~3 条、每条约 20 字、先说结论），
+  personas.json 五个人格的【输出格式】同步补充。
+- eat(bridge): sendReply 逐条发气泡，第一条等 	ypingDelayMs，之后每条
+  ubbleDelayMs + 字数×22ms(≤600) + 0~250ms 随机；ehavior.maxBubbles（默认 3）、
+  ehavior.bubbleDelayMs（默认 700）可调。
+- eat(data): cloud/data/pet.json 增加 maxBubbles / splitChance。
+- ix(bridge): /记忆 命令引用了不在作用域内的 conv（ReferenceError: conv is not defined），
+  群里/私聊发 /记忆 都会直接回「脑袋卡住了」——现在在 handleCommand 内部自己算 conv。
+- 自测 33/33（新增「模型分段时发成多个气泡」用例；测试里把 ubbleDelayMs/	ypingDelayMs 置 0 免得跑得慢）。
 ## v1.0.1 — 2026-10-24
 
 - ix(scripts): scripts/git-push.mjs 推送时补上 isomorphic-git 的 Node http 客户端（否则报

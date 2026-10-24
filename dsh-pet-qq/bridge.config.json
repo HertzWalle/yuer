@@ -15,7 +15,9 @@
     "imageDelayMs": 600,
     "typingDelayMs": 300,
     "logMessages": true,
-    "errorReply": "呜……脑袋卡住了，等我一下下。"
+    "errorReply": "呜……脑袋卡住了，等我一下下。",
+    "maxBubbles": 3,
+    "bubbleDelayMs": 700
   },
   "proactive": {
     "enabled": true,

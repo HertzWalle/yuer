@@ -204,6 +204,11 @@ async function memePoolFor(conf) {
   return limitPool(pool, conf.chatImageLimit ?? 0);
 }
 
+/** 与人格无关的「打字习惯」硬约束：模型经常忘了字数上限，这句每轮都提醒它 */
+const REPLY_STYLE =
+  '\n\n【回复方式】像在 QQ 上打字：把话分成 1~3 条短消息（用换行隔开），每条尽量 20 字以内；' +
+  '问题再复杂也先说结论，最多 3 条，别写成一大段。';
+
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
  * 每个群单开一桶 `<petId>@<conv>`——群里是「你鱼姐」、私聊是「小蓝」，
@@ -212,6 +217,142 @@ async function memePoolFor(conf) {
 function bucketOf(petId, kind, conv) {
   if (kind === 'group' && conv) return `${petId}@${conv}`;
   return petId;
+}
+
+/**
+ * 把一条回复拆成「像真人打字那样」的几个气泡。
+ *
+ * 两条路径：
+ * 1. 模型自己用换行/`||` 分好了段——直接采纳（它的分段点通常更自然）；
+ * 2. 模型给了一整句——**按概率**在标点处断成 2 段（不是每次都断，否则更假）。
+ *
+ * 无论哪条路径都做同样的收尾：去掉列表符号、丢掉空段、太短的并回上一段、最多 max 段。
+ */
+export function splitBubbles(text, { max = 3, chance = 0.5, rng = Math.random } = {}) {
+  const raw = String(text ?? '');
+  let parts = raw
+    .replace(/\\n/g, '\n')
+    .split(/\n+|\|\|/)
+    .map((s) => s.replace(/^\s*[-*·•]\s*/, '').trim())
+    .filter((s) => s && !/^[。！？!?，,、；;…]+$/.test(s));
+
+  if (!parts.length) return [];
+
+  if (parts.length === 1) {
+    const one = parts[0];
+    // 短句不拆：本来一句话就说完的，硬拆反而假
+    if (one.length >= 26 && rng() < chance) {
+      const cut = pickCut(one);
+      if (cut) {
+        const left = one.slice(0, cut).trim();
+        const right = one.slice(cut).replace(/^[。！？!?，,、；;…\s]+/, '').trim();
+        if (left.length >= 5 && right.length >= 4) parts = [left, right];
+      }
+    }
+  }
+
+  // 太碎的并回上一段
+  const merged = [];
+  for (const p of parts) {
+    if (merged.length && p.length < 3) merged[merged.length - 1] += p;
+    else merged.push(p);
+  }
+
+  // 气泡结尾的逗号/分号去掉：真人分两条发时，前一条很少留个「，」吊着
+  const tidy = merged.map((s, i) =>
+    i === merged.length - 1 ? s.trim() : s.replace(/[，,、；;：:\s]+$/, '').trim(),
+  );
+
+  const kept = tidy.filter((s) => s.length > 0);
+
+  // 一条塞太多字时按句号再切（模型偶尔会忘了字数上限，长段落一条气泡很难读）
+  const expanded = [];
+  for (const s of kept) {
+    if (s.length <= LONG_BUBBLE) {
+      expanded.push(s);
+      continue;
+    }
+    for (const piece of sentenceChunks(s, LONG_BUBBLE)) expanded.push(piece);
+  }
+
+  if (expanded.length > max) {
+    const head = expanded.slice(0, max - 1);
+    const tail = expanded.slice(max - 1).join('');
+    head.push(tail.length > HARD_BUBBLE ? clip(tail, HARD_BUBBLE) : tail);
+    return head;
+  }
+  return expanded;
+}
+
+/** 单条气泡的舒适长度 / 拼接后的硬上限 */
+const LONG_BUBBLE = 70;
+const HARD_BUBBLE = 90;
+
+/** 按句号/问号/叹号/分号切句，再贪心攒到不超过 limit 的块 */
+function sentenceChunks(text, limit) {
+  const sentences = text.match(/[^。！？!?；;\n]+[。！？!?；;]?/g) ?? [text];
+  const out = [];
+  let buf = '';
+  for (const s of sentences) {
+    const t = s.trim();
+    if (!t) continue;
+    if (!buf) buf = t;
+    else if (buf.length + t.length <= limit) buf += t;
+    else {
+      out.push(buf);
+      buf = t;
+    }
+  }
+  if (buf) out.push(buf);
+  return out.flatMap((x) => (x.length <= limit ? [x] : splitRough(x, limit)));
+}
+
+/** 没有标点可切时的兜底：按逗号硬切，再不行按字数切 */
+function splitRough(text, limit) {
+  const parts = text.split(/(?<=[，,、])/);
+  const out = [];
+  let buf = '';
+  for (const p of parts) {
+    if (!buf) buf = p;
+    else if (buf.length + p.length <= limit) buf += p;
+    else {
+      out.push(buf);
+      buf = p;
+    }
+  }
+  if (buf) out.push(buf);
+  return out.flatMap((x) => {
+    if (x.length <= limit) return [x];
+    const pieces = [];
+    for (let i = 0; i < x.length; i += limit) pieces.push(x.slice(i, i + limit));
+    return pieces;
+  });
+}
+
+/** 截到 limit 以内并在标点处收尾，避免半句话 */
+function clip(text, limit) {
+  const cut = text.slice(0, limit);
+  const at = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('！'), cut.lastIndexOf('？'), cut.lastIndexOf('，'));
+  const body = at >= limit * 0.5 ? cut.slice(0, at + 1) : cut;
+  return body.replace(/[，,、；;：:]+$/, '') + '…';
+}
+
+/** 在标点后找一个离中间最近的断点；找不到返回 0 */
+function pickCut(s) {
+  const marks = /[，,、；;。！？!?…~～]/g;
+  const mid = s.length / 2;
+  let best = 0;
+  let bestDist = Infinity;
+  for (let m = marks.exec(s); m; m = marks.exec(s)) {
+    const at = m.index + m[0].length;
+    if (at < 5 || s.length - at < 4) continue;
+    const d = Math.abs(at - mid);
+    if (d < bestDist) {
+      bestDist = d;
+      best = at;
+    }
+  }
+  return best;
 }
 
 /**
@@ -230,7 +371,9 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   const kind = normSurface(surface);
   const bucket = bucketOf(petId, kind, conv);
   const persona = await resolvePersona(surface, petId);
-  const system = composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() });
+  const system =
+    composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
+    REPLY_STYLE;
 
   const rounds = Math.max(1, Math.floor(Number(conf.chatMemoryRounds) || 5));
   const history = await recentFromStore(ENTRY, bucket, rounds * 2);
@@ -253,13 +396,21 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   const { text: body, image } = extractChatImage(res.text, pool);
   const finalText = body.trim() || res.text.trim();
 
+  // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按概率断一次
+  const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(conf.maxBubbles) || 3)));
+  const splitChance = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
+  const segments = splitBubbles(finalText, { max: maxBubbles, chance: splitChance });
+  const stored = (segments.length ? segments.join(' ') : finalText).trim();
+
   await appendMessages(ENTRY, bucket, [
     { role: 'user', content: input },
-    { role: 'assistant', content: finalText },
+    { role: 'assistant', content: stored },
   ]);
-  await writeSay(petId, image ? { text: finalText, image } : { text: finalText });
+  await writeSay(petId, image ? { text: stored, image } : { text: stored });
 
-  return image ? { ok: true, text: finalText, image } : { ok: true, text: finalText };
+  return image
+    ? { ok: true, text: stored, segments, image }
+    : { ok: true, text: stored, segments };
 }
 
 /** 最近若干条记忆（桥的 /记忆 用；rounds 是条数，conv 决定桶） */

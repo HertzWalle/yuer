@@ -8,9 +8,11 @@
     "status": "node scripts/git-push.mjs status",
     "commit": "node scripts/git-push.mjs commit",
     "release": "node scripts/git-push.mjs release",
-    "push": "node scripts/git-push.mjs push",
+    "push": "node scripts/push-api.mjs",
     "selftest": "node dsh-pet-qq/cloud/tests/selftest.mjs",
-    "bridge-test": "node dsh-pet-qq/test-bridge.mjs"
+    "bridge-test": "node dsh-pet-qq/test-bridge.mjs",
+    "push-api": "node scripts/push-api.mjs",
+    "push-git": "node scripts/git-push.mjs push"
   },
   "devDependencies": {
     "isomorphic-git": "^1.33.1"
