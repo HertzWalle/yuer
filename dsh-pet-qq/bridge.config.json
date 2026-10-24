@@ -1,0 +1,42 @@
+{
+  "pet": {
+    "id": "main",
+    "surface": "any"
+  },
+  "onebot": {
+    "ws": "ws://127.0.0.1:3001",
+    "accessToken": ""
+  },
+  "behavior": {
+    "privateReply": true,
+    "groupReply": "at",
+    "sendMeme": true,
+    "memeChance": 0.35,
+    "imageDelayMs": 600,
+    "typingDelayMs": 300,
+    "logMessages": true,
+    "errorReply": "呜……脑袋卡住了，等我一下下。"
+  },
+  "proactive": {
+    "enabled": true,
+    "ownerIds": [
+      "1360153202"
+    ],
+    "tickSec": 300,
+    "quietHours": [
+      "23:30",
+      "07:30"
+    ],
+    "impulseThreshold": 70,
+    "impulseCost": 45,
+    "ratePerHour": 6,
+    "recentBonus": 3,
+    "dailyLimit": 5,
+    "minGapMin": 50,
+    "recentGuardMin": 20,
+    "commitmentLeadMin": 20,
+    "dryRun": false
+  },
+  "groupWhitelist": [],
+  "userBlacklist": []
+}

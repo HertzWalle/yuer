@@ -1,0 +1,19 @@
+[Unit]
+Description=dsh-pet QQ bot (cloud brain: OneBot bridge + memory backup)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dshpet
+WorkingDirectory=/opt/dsh-pet
+EnvironmentFile=-/opt/dsh-pet/.env
+ExecStart=/usr/local/bin/node start-bot.mjs
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
