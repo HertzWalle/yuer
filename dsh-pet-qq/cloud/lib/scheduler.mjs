@@ -32,7 +32,10 @@ import {
 import { dueSoon, extractCommitments, humanTime, loadCommitments, markStatus, openItems } from './commitments.mjs';
 import { generateCommitmentMessage, generateMood, generateProactive, moodWord } from './proactive.mjs';
 import { cleanMood, publishMood, readFeed } from './qzone.mjs';
-import { addNote } from './semantic.mjs';
+import { addNote, decayAndArchive, recentNotes } from './semantic.mjs';
+import { biliNote, douyinNote, fetchSeen } from './feeds.mjs';
+import { loadSelf, updateSelf } from './memory-manager.mjs';
+import { chatCompletion } from './llm.mjs';
 import {
   GROUP_DEFAULTS,
   applyAnnoyanceCooldown,
@@ -529,6 +532,133 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     }
   }
 
+  /* ------------------- S3：自己刷一下 B 站 / 抖音（只读） ------------------- */
+
+  const FEED_DEFAULTS = {
+    enabled: false,
+    hours: [10, 20], // 一天两次，别刷个没完
+    biliLimit: 5,
+    douyinLimit: 5,
+    importance: 0.35, // 比「主人发的说说」低：热搜是背景噪音，不是关系
+    timeoutMs: 15_000,
+  };
+  let feedCache = null;
+
+  async function feedConfig() {
+    if (feedCache) return feedCache;
+    const fromPet = (await loadPet())?.feeds;
+    feedCache = { ...FEED_DEFAULTS, ...fromPet, ...(conf.feeds || {}) };
+    return feedCache;
+  }
+
+  function feedState(agency) {
+    if (!agency.feeds || typeof agency.feeds !== 'object') agency.feeds = {};
+    if (!agency.feeds.days || typeof agency.feeds.days !== 'object') agency.feeds.days = {};
+    return agency.feeds;
+  }
+
+  /** 到点各刷一次；同一小时只刷一次，天数只留最近 7 天（state.json 别无限长） */
+  async function runFeeds(agency, t, dry = false) {
+    const fc = await feedConfig();
+    if (!fc.enabled) return;
+    const fa = feedState(agency);
+    const day = dayKey(t);
+    const hour = t.getHours();
+    const hours = (Array.isArray(fc.hours) ? fc.hours : FEED_DEFAULTS.hours)
+      .map(Number)
+      .filter((h) => Number.isFinite(h) && h >= 0 && h < 24);
+    if (!hours.includes(hour)) return;
+    const doneToday = Array.isArray(fa.days[day]) ? fa.days[day] : [];
+    if (doneToday.includes(hour)) return;
+
+    const res = await fetchSeen({
+      biliLimit: Number(fc.biliLimit) || 5,
+      douyinLimit: Number(fc.douyinLimit) || 5,
+      timeoutMs: Number(fc.timeoutMs) || FEED_DEFAULTS.timeoutMs,
+    });
+
+    let wrote = 0;
+    if (res.bili.ok) {
+      for (const item of res.bili.items) {
+        const n = await addNote('bilibili', biliNote(item), { at: t.getTime(), importance: fc.importance });
+        if (n) wrote += 1;
+      }
+    } else {
+      fa.biliFails = Number(fa.biliFails || 0) + 1;
+      await trace({ kind: 'feeds-bili-error', reason: res.bili.reason, message: res.bili.message });
+    }
+    if (res.douyin.ok) {
+      for (const item of res.douyin.items) {
+        const n = await addNote('douyin', douyinNote(item), { at: t.getTime(), importance: fc.importance });
+        if (n) wrote += 1;
+      }
+    } else {
+      fa.douyinFails = Number(fa.douyinFails || 0) + 1;
+      await trace({ kind: 'feeds-douyin-error', reason: res.douyin.reason, message: res.douyin.message });
+    }
+
+    fa.days[day] = [...doneToday, hour];
+    fa.lastAt = t.getTime();
+    const keep = Object.keys(fa.days).sort().slice(-7);
+    for (const k of Object.keys(fa.days)) if (!keep.includes(k)) delete fa.days[k];
+
+    await trace({
+      kind: 'feeds-read',
+      hour,
+      bili: res.bili.ok ? res.bili.items.length : 0,
+      douyin: res.douyin.ok ? res.douyin.items.length : 0,
+      wrote,
+      dry: Boolean(dry),
+    });
+    if (wrote) {
+      log.info(`刷了一圈：B 站 ${res.bili.ok ? res.bili.items.length : '失败'}，抖音 ${res.douyin.ok ? res.douyin.items.length : '失败'}`);
+    }
+  }
+
+  /** 自我模型：一天最多更新一次，字数硬上限、变化过大直接拒绝（防人格漂移） */
+  async function refreshSelf(agency, t) {
+    const cur = await loadSelf();
+    if (cur && t.getTime() - Number(cur.updatedAt || 0) < 24 * 3_600_000) return;
+    const pet = await loadPet();
+    const ctx = await personaFor('private');
+    const notes = await recentNotes(12);
+    const chatted = notes.length
+      ? notes.map((n) => `- ${n.text}`).join('\n')
+      : '（最近没什么特别的事）';
+    const res = await chatCompletion(
+      [
+        {
+          role: 'system',
+          content:
+            '你在帮一个聊天机器人写「她对自己的认识」，会每轮作为背景注入，所以必须短、稳、不夸张。' +
+            '用第一人称写 3~5 个短句、不超过 180 字：我是谁（名字、身份）、我在意什么、我跟主人是什么关系、最近心里挂着的一件事。' +
+            '不要写日期、不要列点、不要承诺任何新的能力，也不要写成日记。',
+        },
+        {
+          role: 'user',
+          content: `她是「${ctx.name}」。最近她自己记得的事：\n${chatted}`,
+        },
+      ],
+      { temperature: 0.4, maxTokens: 260 },
+    );
+    if (!res.ok || !res.text) return;
+    const out = await updateSelf({ text: res.text, now: t.getTime() });
+    await trace({ kind: 'self-update', ok: Boolean(out.ok), reason: out.reason ?? null, pet: pet?.pet?.name ?? null });
+  }
+
+  /** 每天一次的记忆保养：衰减 + 归档（S5 遗忘曲线） */
+  async function runMemoryMaintenance(agency, t) {
+    const day = dayKey(t);
+    const ma = agency.memory && typeof agency.memory === 'object' ? agency.memory : (agency.memory = {});
+    if (ma.decayedDay === day) return;
+    if (t.getHours() < 4) return; // 凌晨 4 点后才算这天的账，避免刚过零点就动
+    const res = await decayAndArchive({ now: t.getTime() });
+    ma.decayedDay = day;
+    ma.archived = Number(res.archived || 0);
+    await trace({ kind: 'memory-decay', archived: res.archived, kept: res.kept });
+    await refreshSelf(agency, t);
+  }
+
   /** 一次完整决策（导出给测试与 CLI 用） */
   async function tick({ dry = false } = {}) {
     const t = now();
@@ -550,6 +680,10 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
       if (!inQuietHours(t, quiet)) await runGroups(agency, t, dry);
       // 空间也独立：读动态按 readHour，发说说自己看阈值/静默/dryRun
       await runQzone(agency, t, dry);
+      // 自己刷 B 站/抖音（只读，进语义记忆），到配置的小时才动
+      await runFeeds(agency, t, dry);
+      // 每天一次的记忆保养（衰减 + 归档）
+      await runMemoryMaintenance(agency, t);
     }
 
     warmup = false;

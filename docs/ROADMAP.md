@@ -46,12 +46,16 @@
 
 **验收**：连续一周真实群跑，日均主动发言 ≤ 1/群，0 次被踢/被投诉，`trace.jsonl` 每条都有可解释理由。
 
-## S3 · 自己有输入（v1.4.0，约 2 天）
+## S3 · 自己有输入（v1.6.0 已上线，约 2 天）
 
 > **2026-10-24 增补**：先做的是「QQ 空间」这一路（用户 #3 需求），已随 **v1.3.0** 上线——
 > A 档每天 21 点读一次动态写语义记忆（`data/semantic.json`，私聊 prompt 带最近 5 条），
 > B 档每天最多 1 条纯文字说说（默认 `dryRun: true` 只生成不发布，`/空间 发` 可手发）。
-> B 站 / 抖音见下，留待下一轮。
+>
+> **v1.6.0 补齐**：`cloud/lib/feeds.mjs` 每天 10 点 / 20 点各刷一次 B 站热门
+> （`api.bilibili.com/x/web-interface/popular`）与抖音热搜（第三方聚合 `60s.viki.moe`），
+> 压成一行一条写进语义记忆；`/看到` 可查看，聊天时按关键词 `recall` 自然带一句。
+> 关注 UP 的更新需要登录 cookie，暂缺（未做）。
 
 - **B 站**：定时（2–3 次/天）拉「热门 + 关注的 UP 主更新 + 评论区高赞」，每条记成
   `{"kind":"seen","platform":"bilibili","title","up","url","summary","tags","at"}`
@@ -61,7 +65,12 @@
 
 **验收**：隔天问「你昨天看什么了」能答上来；不相关的话不会硬塞。
 
-## S4 · 接入层可替换（v1.5.0，约 1–2 天）
+## S4 · 接入层可替换（v1.6.0 已上线，约 1–2 天）
+
+> **2026-10-24 实现**：`cloud/lib/turn-server.mjs` 提供 `POST /turn`（token 鉴权、默认只听回环）、
+> `GET /health`、`GET /personas`；契约与 curl 示例见 `dsh-pet-qq/docs/TURN.md`。
+> 参考适配器 `dsh-pet-qq/adapters/astrbot_plugin_yuer/`（AstrBot 插件，~90 行）。
+> **范围**：只解耦「一轮对话」；主动性/指令/引用回复/表情包出站仍在 OneBot 桥里（见 TURN.md 的诚实说明）。
 
 - 用 150–250 行适配器把 `POST /turn` 接到 LangBot 或 AstrBot（二选一，倾向 LangBot：
   多流水线 + MCP + 更 agent 化），**大脑与人格一行不改**。
@@ -70,7 +79,12 @@
 
 **验收**：私聊 / 群聊行为与 v1.4.0 一致；切换窗口 < 10 分钟；可随时切回自研桥。
 
-## S5 · 记忆管理（v1.6.0，约 2–3 天）
+## S5 · 记忆管理（v1.6.0 已上线，约 2–3 天）
+
+> **2026-10-24 实现**：`cloud/lib/memory-manager.mjs`（L2 压缩摘要落盘 `data/summaries/`、
+> 摘要的摘要、按轮截断兜底、自我模型 `data/self.json` 带 24h/drift 双闸）+ `cloud/lib/semantic.mjs`
+> 重写（importance / lastUsedAt / 关键词 recall / 衰减归档 `data/archive/`）+ `/记忆` 显示摘要、
+> `/忘记 <词>`、`/我是谁`。自测覆盖压缩落盘、摘要复用、检索、遗忘。
 
 参考 AstrBot 的上下文压缩机制（`astrbot/core/agent/context/compressor.py`），但补上它没有的「长期记忆」。
 AstrBot 的做法可以概括成三件事：

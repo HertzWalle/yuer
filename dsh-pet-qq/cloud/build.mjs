@@ -124,8 +124,17 @@ async function main() {
 
   // 云端 lib：pet-api 换成云实现，其余（下载器不需要）不打包
   await cp(join(HERE, 'lib', 'pet-api.mjs'), join(DIST, 'lib', 'pet-api.mjs'));
-  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs']) {
+  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs', 'feeds.mjs', 'memory-manager.mjs', 'turn-server.mjs', 'version.mjs']) {
     await cp(join(HERE, 'lib', f), join(DIST, 'lib', f));
+  }
+
+  // 版本号（turn-server 的 /health 会读它）。仓库根的 VERSION 在 cloud/ 的上两级。
+  const versionFile = [join(ROOT, '..', 'VERSION'), join(ROOT, 'VERSION')].find((p) => existsSync(p));
+  if (versionFile) {
+    await cp(versionFile, join(DIST, 'VERSION'));
+    console.log(`[build] 版本号：${(await readFile(versionFile, 'utf8')).trim()}`);
+  } else {
+    console.warn('[build] 没找到 VERSION，/health 会显示 0.0.0');
   }
 
   // 数据

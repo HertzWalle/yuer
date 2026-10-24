@@ -3,6 +3,24 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.6.0 — 2026-10-24
+
+S3 / S4 / S5 一起落地：她有自己的输入（B 站 + 抖音热搜），接入层能换（`/turn` 契约），记忆开始分层（压缩摘要 + 语义记忆 + 自我模型 + 遗忘）。
+
+- `feat(feeds)`: 新增 `cloud/lib/feeds.mjs`——`fetchBili`（`api.bilibili.com/x/web-interface/popular`，需 UA + referer）、`fetchDouyin`（第三方聚合 `60s.viki.moe/v2/douyin`，不碰抖音客户端）、纯函数 `parseBiliPopular/parseBiliRanking/parseDouyinHot`、`biliNote/douyinNote` 压成一行、`humanCount` 把播放量写成「2.3万」。
+- `feat(scheduler)`: `runFeeds()` 每天 `feeds.hours`（默认 10/20 点）各刷一次，同小时只跑一次、`agency.feeds.days` 只留 7 天；抓到的每条写进语义记忆（`kind: bilibili|douyin`，`importance 0.35`），失败写 `feeds-*-error` 不重试刷屏。
+- `feat(memory)`: `cloud/lib/semantic.mjs` 重写——note 带 `importance/lastUsedAt/usedCount`；`recall()` 关键词检索（整串包含 = 1，否则取 2-gram 覆盖率与最长公共子串占比的较大值）；`touch()` 被用到就加分；`decayAndArchive()` 每天衰减 0.02，30 天没用且 < 0.15 的挪进 `data/archive/semantic-*.jsonl`（不删）；`forget(keyword)` 定点遗忘。
+- `feat(memory)`: 新增 `cloud/lib/memory-manager.mjs`——`manageHistory()` 按 token 预算（默认 900，超过 82% 触发）把更早轮次压成摘要，**落盘** `data/summaries/<bucket>.json`，以「（以下是之前聊过的内容的摘要）」+「（已了解）」一对注入；摘要超长做「摘要的摘要」；模型不可用时按轮截断兜底，且**永不丢摘要那一对**。
+- `feat(memory)`: 自我模型 `data/self.json`（≤220 字）——`refreshSelf()` 每天一次，`updateSelf()` 带双闸：24 小时内不改、与旧文本字面重合度 < 0.35 判漂移直接拒绝；私聊 system prompt 注入 `【你对自己的认识】`。
+- `feat(chat)`: `pet-api.chat()` 私聊注入三块背景——`seenBrief()`（最近刷到的）、`recall()` 命中的旧事（命中即 `touch`）、`selfBrief()`；历史走 `manageHistory()`。
+- `feat(commands)`: `/记忆` 顶部显示压缩摘要；新增 `/看到 [n]`（最近看过的）、`/忘记 <词>`（只删语义记忆，不动对话原文）、`/我是谁`、`/解禁 [群号]`（清掉某个群的反感度冷却与冲动，默认当前群）。五条都只在主人发时生效。
+- `feat(s4)`: 新增 `cloud/lib/turn-server.mjs`——`POST /turn`（`x-turn-token` 鉴权、64 KB 上限、`conv` 决定私聊/群聊与按群人设）、`GET /health`（免鉴权）、`GET /personas`；`start-bot.mjs` 检测到 `TURN_TOKEN` 才启动，默认只听 `127.0.0.1:3030`。
+- `feat(s4)`: 契约文档 `dsh-pet-qq/docs/TURN.md`（请求/响应/错误码/curl/「接入层还缺什么」）；参考适配器 `dsh-pet-qq/adapters/astrbot_plugin_yuer/`（`main.py` + `metadata.yaml` + `_conf_schema.json` + README），只做传输、逐条 yield 成气泡。
+- `feat(config)`: `pet.json` 新增 `feeds`（`enabled/hours/biliLimit/douyinLimit`）与 `memory`（`maxHistoryTokens/compressAt/keepRecentRatio/summaryMaxChars`）；`.env.example` 新增 `TURN_TOKEN/TURN_HOST/TURN_PORT`。
+- `fix(build)`: 打包时从仓库根（`cloud/` 的上两级）找 `VERSION` 复制进 `dist/`，`/turn` 的 `/health` 才会报真版本号（之前是 `0.0.0`）。
+- `test`: 自测 **77/77**（新增 14 项：B 站/抖音解析、播放量缩写、记忆文案、语义检索、定点遗忘、压缩落盘、摘要注入顺序、摘要复用、`/turn` 健康检查、无 token 401、气泡数组、空文本 400、`/解禁` 清冷却）。
+- `docs`: `docs/ROADMAP.md` 的 S3/S4/S5 标记已上线；`dsh-pet-qq/README.md` 新增「她自己的生活（B 站 / 抖音）」「记忆分层」「换接入层（`/turn`）」三节。
+
 ## v1.5.0 — 2026-10-24
 
 会接「引用回复」了：别人引用她说过的话、或者她引用别人的话再问，她都能接住，回的时候也带上引用。

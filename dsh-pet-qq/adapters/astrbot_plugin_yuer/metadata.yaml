@@ -1,0 +1,6 @@
+name: astrbot_plugin_yuer
+display_name: yuer 大脑接入
+desc: 把消息转发给 yuer 大脑的 /turn 契约，只做传输层（人设/记忆/主动性仍在 yuer 那边）
+version: 1.0.0
+author: HertzWalle
+repo: https://github.com/HertzWalle/yuer

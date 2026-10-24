@@ -1,0 +1,22 @@
+{
+  "turn_url": {
+    "type": "string",
+    "default": "http://127.0.0.1:3030/turn",
+    "description": "yuer 大脑的 /turn 地址（跨机走 Tailscale/隧道，别暴露公网）"
+  },
+  "turn_token": {
+    "type": "string",
+    "default": "",
+    "description": "与 yuer .env 里的 TURN_TOKEN 一致"
+  },
+  "timeout_sec": {
+    "type": "int",
+    "default": 120,
+    "description": "单轮对话超时（秒）"
+  },
+  "ignore_prefixes": {
+    "type": "list",
+    "default": ["/"],
+    "description": "这些前缀的消息不转发（AstrBot 自己的指令）"
+  }
+}

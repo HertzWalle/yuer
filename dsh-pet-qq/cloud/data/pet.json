@@ -86,5 +86,17 @@
     "private": "xiaolan",
     "group": "niyujie",
     "groups": {}
+  },
+  "feeds": {
+    "enabled": true,
+    "hours": [10, 20],
+    "biliLimit": 5,
+    "douyinLimit": 5
+  },
+  "memory": {
+    "maxHistoryTokens": 900,
+    "compressAt": 0.82,
+    "keepRecentRatio": 0.15,
+    "summaryMaxChars": 700
   }
 }

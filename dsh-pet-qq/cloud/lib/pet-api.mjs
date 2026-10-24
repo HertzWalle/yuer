@@ -18,7 +18,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { composeSystemPrompt } from './prompt.mjs';
-import { notesBrief } from './semantic.mjs';
+import { notesBrief, recall, recentNotes, seenBrief, touch } from './semantic.mjs';
+import { loadSummary, manageHistory, selfBrief } from './memory-manager.mjs';
 import { extractChatImage, imageInstruction, limitPool, readMemePool, resolveMemeFile } from './memes.mjs';
 import { chatCompletion } from './llm.mjs';
 import {
@@ -491,15 +492,37 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   const kind = normSurface(surface);
   const bucket = bucketOf(petId, kind, conv);
   const persona = await resolvePersona(surface, petId, conv);
-  // 语义记忆（比如昨天她自己看到的说说）只挂在私聊：群里不需要她汇报私事
-  const background = kind === 'private' ? await notesBrief() : '';
+  // 语义记忆（她看到的说说/热搜、说过的旧事、对自己的认识）只挂在私聊：
+  // 群里不需要她汇报私事，也不需要她把「自我模型」念一遍。
+  let background = '';
+  if (kind === 'private') {
+    const [seen, self, hits] = await Promise.all([
+      seenBrief({ n: 6 }),
+      selfBrief(),
+      recall(input, { n: 3 }),
+    ]);
+    const recalled = hits.length
+      ? '\n\n【你想起来的】下面几件旧事跟你现在这句话有关，用得上的话自然带一句，用不上就当没看见，别复述：\n' +
+        hits
+          .map((h) => {
+            const d = new Date(h.at);
+            return `- ${d.getMonth() + 1}月${d.getDate()}日：${h.text}`;
+          })
+          .join('\n')
+      : '';
+    background = seen + recalled + self;
+    if (hits.length) await touch(hits.map((h) => h.id));
+  }
   const system =
     composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
     REPLY_STYLE +
     background;
 
   const rounds = Math.max(1, Math.floor(Number(conf.chatMemoryRounds) || 5));
-  const history = await recentFromStore(ENTRY, bucket, rounds * 2);
+  // 多取一些再交给记忆管理：早期轮次会被压成摘要（L2），摘要落盘、重启不丢
+  const raw = await recentFromStore(ENTRY, bucket, rounds * 6);
+  const managed = await manageHistory({ bucket, messages: raw, conf });
+  const history = managed.messages;
 
   // 配图资格：先掷骰子，有资格才把清单交给模型（省 token、也压住带图率）
   const gate = await memeGate(conf, kind);
@@ -545,6 +568,38 @@ export async function recentMessages(petId = 'main', rounds, { surface = 'privat
   const n = Math.max(0, Math.floor(Number(rounds) || 0));
   const messages = await recentFromStore(ENTRY, bucketOf(petId, normSurface(surface), conv), n);
   return { ok: true, messages };
+}
+
+/** /记忆 用的摘要（L2 压缩产物；没有就空） */
+export async function memorySummary(petId = 'main', { surface = 'private', conv = '' } = {}) {
+  const bucket = bucketOf(petId, normSurface(surface), conv);
+  const saved = await loadSummary(bucket);
+  return { ok: true, bucket, summary: saved?.summary ?? '', updatedAt: saved?.updatedAt ?? null };
+}
+
+/** /看到 用：最近她刷到/看到的事（L3 语义记忆） */
+export async function seenNotes(n = 10, kind = null) {
+  const list = await recentNotes(Math.max(1, Math.min(30, Number(n) || 10)), kind);
+  return { ok: true, notes: list };
+}
+
+/** 记住一条（工具/指令用；importance 决定它多抗遗忘） */
+export async function remember(text, { kind = 'note', importance = 0.6 } = {}) {
+  const { addNote } = await import('./semantic.mjs');
+  const note = await addNote(kind, text, { importance });
+  return { ok: Boolean(note), note };
+}
+
+/** 忘掉含某个词的语义记忆（/忘记 用），返回删掉的条数 */
+export async function forgetNotes(keyword) {
+  const { forget } = await import('./semantic.mjs');
+  return { ok: true, removed: await forget(keyword) };
+}
+
+/** /我是谁 用：自我模型（≤220 字，一天最多变一次） */
+export async function selfState() {
+  const { loadSelf } = await import('./memory-manager.mjs');
+  return { ok: true, self: await loadSelf() };
 }
 
 export async function getState() {

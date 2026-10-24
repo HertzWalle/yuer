@@ -222,6 +222,7 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
 - **反感度是硬开关**：有人明确制止（「别说话」「闭嘴」「消停点」）+30（对着她说 +40）、抱怨/嫌吵 +20、她说完 3 分钟内群里又冒出两句却没人接 +10，每小时自然回落 2。到 60 立刻冷却 12 小时、到 100 冷却 7 天，冷却期冲动清零。**不是写进提示词劝它，而是直接把欲望归零。**
 - **插话不带 @**：模型不 @ 任何人（被点名回答时才是正常回复），所以看起来像群里随口接一句。
 - 想关掉群旁听：`bridge.config.json` 的 `behavior.observeGroups: false`（或 `proactive.group.enabled: false` 只关插话、保留观察）。
+- 被冷却了想立刻解禁：`/解禁 群号`（不带群号 = 当前群 / 列出各群状态）——清掉反感度、冷却、冲动和「说完没人接」的记账，只认主人。
 - 想看每个群的账：`/心思` 末尾会列出各群「冲动/120、反感、冷却、今天几次」。翻账：`sudo tail -f /opt/dsh-pet/logs/trace.jsonl`（`group-gate` / `group-skip` / `group-proactive` / `group-cooldown`）。
 - 调参都在 `bridge.config.json` 的 `proactive.group`：`threshold`、`dailyPerGroup`、`minGapHours`、`scoreMin`、`bufferMin`、`perMessage`、`mentionBonus`、`topicBonus`。
 
@@ -240,6 +241,49 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
   - `/空间 关` / `/空间 开` —— 停用 / 恢复（恢复时清掉连败计数）
 - 配置在 `cloud/data/pet.json` 的 `qzone` 段：`enabled`、`readHour`、`readNum`、`freshDays`、`publishEnabled`、`dailyLimit`、`impulseThreshold`、`impulseCost`、`maxChars`、`dryRun`、`maxFails`。
 - 已知边界：`g_tk` 必须用 **p_skey**、域名必须是 `taotao.qq.com`（`taotao.qzone.qq.com` 会返回 `code=-10000 使用人数过多`）；skey 会过期，过期后读/发都会失败并计一次 fails；非官方接口，频率高了有风控风险——所以日上限写死 1 条、默认 dryRun。
+### 她自己的生活（B 站 / 抖音，S3）
+
+`cloud/lib/feeds.mjs` + 调度器每天在 `feeds.hours`（默认 10 点、20 点）各刷一次，只读、不登录、不点赞：
+
+- **B 站**：`api.bilibili.com/x/web-interface/popular`（热门，需 UA + `referer: https://www.bilibili.com/`），压成一行 `B站热门：<标题>｜UP：<up>｜<分区>｜<2.3万播放>`。
+- **抖音**：走第三方聚合 `https://60s.viki.moe/v2/douyin`（榜单本身是公开的，不碰抖音客户端、不做自动化登录），压成 `抖音热搜：<标题>（<热度>）`。
+- 每条按 `importance 0.35` 写进语义记忆（比「主人发的说说」低：热搜是背景噪音，不是关系）；同小时只刷一次，`agency.feeds.days` 只留 7 天。
+- 聊天时不会报流水账：私聊 system prompt 里的 `【你最近看到的】` 只列最近 6 条，并要求「最多顺口提一条、别汇报、别列清单」；与其当前这句话相关的旧事会被 `recall()` 单独挑出来。
+- 关注 UP 的更新需要登录 cookie，这版没做（我们没有 B 站账号）。
+- 配置在 `cloud/data/pet.json` 的 `feeds` 段：`enabled`、`hours`、`biliLimit`、`douyinLimit`。
+
+### 记忆分层（S5）
+
+| 层 | 存在哪 | 谁在用 | 说明 |
+| --- | --- | --- | --- |
+| L1 情节记忆 | `data/memory.json` | 每轮对话 | 原文全存、按会话分桶（私聊 `main`、群聊 `main@group:<群号>`） |
+| L2 压缩摘要 | `data/summaries/<bucket>.json` | 每轮注入 | 超过 `maxHistoryTokens`（900）的 82% 时，把更早的轮次压成一段摘要（≤700 字）；摘要太长再做「摘要的摘要」；模型不可用时按轮截断兜底 |
+| L3 语义记忆 | `data/semantic.json` | 聊天时 `recall` / `/看到` | 每条带 `importance`、`lastUsedAt`；每天衰减 0.02，30 天没用且 <0.15 的归档到 `data/archive/`（不删） |
+| 自我模型 | `data/self.json` | 每轮注入（私聊） | ≤220 字「我是谁 / 我在意什么」；一天最多更新一次，与旧文本重合度 <0.35 判漂移直接拒绝 |
+
+- `/记忆 [n]` 顶部会显示压缩摘要，下面是最新一轮原文；`/看到 [n]` 是她最近刷到的；`/忘记 <词>` 只删语义记忆（对话原文不动）；`/我是谁` 看自我模型。- 参考了 AstrBot 的 `compressor.py`（阈值 0.82、保留最近 15%、摘要拼成 user/assistant 一对注入），我们额外做了摘要**落盘**、摘要的摘要、以及自我模型的双闸。
+
+### 换接入层（`/turn`，S4）
+
+大脑和传输解耦：任何接入层对着 `POST /turn` 发一句话，就能拿到「按人设生成的若干条气泡 + 表情包名字」。
+
+```dotenv
+# .env 里配上就自动启动（默认只听回环，别暴露公网）
+TURN_TOKEN=<openssl rand -hex 24>
+TURN_HOST=127.0.0.1
+TURN_PORT=3030
+```
+
+```bash
+curl -s http://127.0.0.1:3030/turn \
+  -H 'content-type: application/json' -H "x-turn-token: $TURN_TOKEN" \
+  -d '{"conv":"private:1360153202","user":{"id":"1360153202","name":"主人"},"text":"在吗"}'
+# → {"ok":true,"segments":["在的呀主人。","刚还在想你咋突然没声了。"],"image":"睡觉",...}
+```
+
+- 契约、错误码、curl 示例：`dsh-pet-qq/docs/TURN.md`；参考适配器：`dsh-pet-qq/adapters/astrbot_plugin_yuer/`。
+- **只解耦「一轮对话」**：主动性、指令、引用回复、表情包出站仍在 OneBot 桥里（A 方案才是全功能；C 方案是「AstrBot 当传输层」）。
+
 ### 谁会被回复
 
 - 私聊：默认都回。
@@ -324,12 +368,19 @@ node cloud/build.mjs
 | `cloud/remote-deploy-memes.sh` | 服务器侧一键：更新代码 + 解表情包 + 合并 + 重启 |
 | `cloud/shrink-memes.py` | 表情包缩图：长边 240px，GIF 逐帧，21.3 MB → 10.3 MB |
 | `cloud/lib/qzone.mjs` | QQ 空间：`get_cookies` → `g_tk`(p_skey) → `send_qzone_msg` / `emotion_cgi_publish_v6` 发说说，`emotion_cgi_msglist_v6` 读动态 |
-| `cloud/lib/semantic.mjs` | 语义记忆 `data/semantic.json`：把看到的事压成一句，私聊 system 里带最近 5 条 |
+| `cloud/lib/semantic.mjs` | 语义记忆 `data/semantic.json`：importance / 关键词 `recall` / 衰减归档 / `forget` |
 | `cloud/remote-deploy-v2.sh` | 服务器侧一键：更新代码 + memes + 合并 `surfaces`/`identity` + 重启 |
 | `cloud/remote-deploy-v4.sh` | 服务器侧一键：v1.3 表情包资格/气泡参数合并 + 重启 |
 | `cloud/remote-deploy-v5.sh` | 服务器侧一键：v1.3 全量参数（含 `qzone` 段）+ 重启 |
 | `cloud/remote-deploy-v6.sh` | 服务器侧一键：v1.4 按群人格（`surfaces.groups`）+ 重启 |
 | `cloud/remote-deploy-v7.sh` | 服务器侧一键：v1.5 引用回复（补 `behavior.quoteReply`）+ 重启 |
+| `cloud/lib/feeds.mjs` | B 站热门 + 抖音热搜聚合：抓取、解析、压成一行语义记忆 |
+| `cloud/lib/memory-manager.mjs` | L2 压缩摘要（落盘 `data/summaries/`）+ 自我模型（`data/self.json`，24h/drift 双闸） |
+| `cloud/lib/turn-server.mjs` | S4 的 `POST /turn` 契约（token 鉴权、默认只听回环） |
+| `cloud/lib/version.mjs` | 读 `VERSION` 给 `/health` 用 |
+| `cloud/remote-deploy-v8.sh` | 服务器侧一键：v1.6 部署（代码 + `feeds`/`memory` 配置 + 可选 `TURN_TOKEN`） |
+| `docs/TURN.md` | `/turn` 契约文档：请求/响应/错误码/curl/接入层还缺什么 |
+| `adapters/astrbot_plugin_yuer/` | AstrBot 参考适配器（只做传输，逐条 yield 成气泡） |
 | `cloud/tests/probe-quote.mjs` | 线上探针：假 transport 带 `call`，验证进出两个方向的引用 |
 | `cloud/remote-verify-v4.sh` | 服务器侧干净副本验证：拷贝 data/personas/lib → 真打模型 → 打印气泡与带图比例 |
 | `pull-memory.ps1` / `pull-memory.cmd` | 本机拉云端记忆：自动开 ssh -L 隧道再跑 `backup-pull.mjs` |

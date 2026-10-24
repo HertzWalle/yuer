@@ -69,6 +69,29 @@ async function main() {
     console.warn('[boot] 没配 BACKUP_TOKEN，记忆备份服务不启动（云端记忆仍会落盘，只是不能远程拉取）');
   }
 
+  // S4：把大脑暴露成 `POST /turn`（配了 TURN_TOKEN 才起，默认只听回环）
+  if ((process.env.TURN_TOKEN || '').trim()) {
+    try {
+      const { createTurnServer } = await import('./lib/turn-server.mjs');
+      const host = (process.env.TURN_HOST || '127.0.0.1').trim();
+      const port = Number(process.env.TURN_PORT || 3030) || 3030;
+      const srv = await createTurnServer({
+        host,
+        port,
+        token: process.env.TURN_TOKEN.trim(),
+        log: {
+          info: (m) => console.log(`[turn] ${m}`),
+          error: (m) => console.error(`[turn] ${m}`),
+        },
+      });
+      console.log(`[boot] /turn 契约已启动：http://${srv.host}:${srv.port}/turn（别的接入层可以直接接）`);
+    } catch (e) {
+      console.error('[boot] /turn 启动失败（机器人仍可正常对话）：' + (e?.message ?? e));
+    }
+  } else {
+    console.log('[boot] 没配 TURN_TOKEN，/turn 契约不启动（只走 OneBot 接入）');
+  }
+
   const { start } = await import('./qq-bridge.mjs');
   const { bridge } = await start(tmpConf);
 

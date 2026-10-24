@@ -11,6 +11,7 @@
 
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -43,6 +44,8 @@ process.env.TZ = process.env.TZ || 'Asia/Shanghai';
 
 const { createBridge } = await import(pathToFileURL(join(DIST, 'qq-bridge.mjs')).href);
 const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href);
+/** 从 dist/lib 里加载一个模块（自测直接用云端实现，测的就是会上线的那份代码） */
+const load = (p) => import(pathToFileURL(join(DIST, 'lib', p)).href);
 
 const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8'));
 // 气泡间隔/尾巴停顿调 0，别让测试干等
@@ -59,8 +62,9 @@ conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001'] };
     memeChanceGroup: 1,
     memeCooldown: 0,
     maxBubbles: 6,
-    // 自测不联网：空间关掉（否则每次 tick 都会试着连 OneBot 拿 cookie）
+    // 自测不联网：空间与 B站/抖音都关掉（否则每次 tick 都会真去抓）
     qzone: { ...(pet.qzone || {}), enabled: false },
+    feeds: { ...(pet.feeds || {}), enabled: false },
   });
   await writeFile(petFile, JSON.stringify(pet, null, 2), 'utf8');
 }
@@ -353,11 +357,166 @@ async function main() {
   await testBubbles();
   await testMemeCooldown();
   await testQzoneHelpers();
+  await testFeeds();
+  await testSemanticMemory();
+  await testMemoryManager();
 
   await testAgency();
 
   // 12 备份服务：起进程 → /health、鉴权、/memory、快照
   await testBackup();
+
+  // 13 S4：/turn 契约
+  await testTurnServer();
+}
+
+/* --------------------------- S3：B 站/抖音解析自测 -------------------------- */
+
+async function testFeeds() {
+  const { parseBiliPopular, parseDouyinHot, biliNote, douyinNote, humanCount } = await load('feeds.mjs');
+
+  const bili = parseBiliPopular(
+    {
+      code: 0,
+      data: {
+        list: [
+          {
+            bvid: 'BV1xx411c7mD',
+            title: '【硬核】三分钟讲明白缓存击穿',
+            short_link_v2: 'https://b23.tv/abc123',
+            owner: { name: '老码农' },
+            tname: '科技',
+            stat: { view: 123456 },
+          },
+        ],
+      },
+    },
+    { limit: 5 },
+  );
+  check('B 站热门解析', bili.length === 1 && bili[0].title.includes('缓存击穿') && bili[0].view === 123456, bili[0]?.url);
+
+  const douyin = parseDouyinHot({ data: [{ title: '某地暴雨', hot_value: 9876543, link: 'https://x/1' }] }, { limit: 3 });
+  check('抖音热搜解析', douyin.length === 1 && douyin[0].hot === 9876543, JSON.stringify(douyin[0]));
+
+  check('播放量缩写', humanCount(23456) === '2.3万' && humanCount(123456789) === '1.2亿', humanCount(23456));
+  const n1 = biliNote(bili[0]);
+  const n2 = douyinNote(douyin[0]);
+  check(
+    'B 站/抖音的语义记忆文案',
+    n1.startsWith('B站热门：') && n1.includes('UP：老码农') && n2.startsWith('抖音热搜：') && n2.includes('987.7万'),
+    `${n1} ｜ ${n2}`,
+  );
+}
+
+/* ------------------------- S5：语义记忆 检索/遗忘 自测 ---------------------- */
+
+async function testSemanticMemory() {
+  const { addNote, recall, forget, recentNotes } = await load('semantic.mjs');
+  await addNote('qzone', '主人动态：今天在机房焊了一晚上服务器', { importance: 0.7 });
+  await addNote('bilibili', 'B站热门：猫咪把键盘踩坏了', { importance: 0.3 });
+
+  const hit = await recall('服务器又抽风了', { n: 3 });
+  check('语义记忆能按关键词想起来', hit.length >= 1 && hit[0].text.includes('服务器'), JSON.stringify(hit.map((h) => h.text)));
+
+  const removed = await forget('焊了一晚上');
+  const left = await recentNotes(10);
+  check('忘记关键词能删掉对应记忆', removed === 1 && !left.some((n) => n.text.includes('焊了一晚上')), `删了 ${removed} 条`);
+}
+
+/* ---------------------- S5：分层记忆压缩（manageHistory） -------------------- */
+
+async function testMemoryManager() {
+  const { manageHistory, MEM_DEFAULTS } = await load('memory-manager.mjs');
+  const bucket = 'main@memorytest';
+  const messages = [];
+  for (let i = 0; i < 24; i++) {
+    messages.push({ role: 'user', content: `第${i}轮：主人说他在改一个很长很长的 bug，编号 ${i}。`, at: Date.now() + i * 1000 });
+    messages.push({ role: 'assistant', content: `第${i}轮：我陪他骂了两句这破 bug，然后让他先喝水。`, at: Date.now() + i * 1000 + 1 });
+  }
+  const res = await manageHistory({
+    bucket,
+    messages,
+    conf: { memory: { ...MEM_DEFAULTS, maxHistoryTokens: 260 } },
+    now: Date.now(),
+  });
+  const summaryFile = join(tmp, 'data', 'summaries', `${bucket}.json`);
+  const saved = existsSync(summaryFile) ? JSON.parse(await readFile(summaryFile, 'utf8')) : null;
+  check(
+    '历史太长会压成摘要并落盘',
+    res.compressed && Boolean(saved?.summary) && res.messages.length < messages.length,
+    `保留 ${res.messages.length}/${messages.length} 条，摘要 ${saved?.summary?.length ?? 0} 字`,
+  );
+  check(
+    '摘要以一对消息注入，后面接最近的轮次',
+    res.messages[0]?.role === 'user' && /摘要/.test(res.messages[0]?.content ?? '') && res.messages[1]?.role === 'assistant',
+    res.messages[0]?.content?.slice(0, 30),
+  );
+
+  // 再跑一次：应该复用已落盘的摘要，而不是重新从零开始
+  const again = await manageHistory({ bucket, messages: messages.slice(-4), conf: { memory: { ...MEM_DEFAULTS, maxHistoryTokens: 260 } } });
+  check('摘要会被复用（重启不丢记忆）', again.messages[0]?.role === 'user' && /摘要/.test(again.messages[0]?.content ?? ''), 'ok');
+}
+
+/* --------------------------- S4：/turn 契约 自测 --------------------------- */
+
+/** 本机回环 HTTP（undici 的 fetch 在 Windows 上会绑 0.0.0.0 导致 EADDRNOTAVAIL，这里显式绑回环） */
+function httpJson(url, { method = 'GET', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url);
+    const req = request(
+      { host: u.hostname, port: u.port, path: u.pathname + u.search, method, headers, localAddress: '127.0.0.1' },
+      (res) => {
+        let b = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => (b += c));
+        res.on('end', () => {
+          let json = null;
+          try {
+            json = JSON.parse(b);
+          } catch {
+            /* 非 JSON 就留 null，断言会失败 */
+          }
+          resolve({ status: res.statusCode, json, text: b });
+        });
+      },
+    );
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function testTurnServer() {
+  const { createTurnServer } = await load('turn-server.mjs');
+  const srv = await createTurnServer({ host: '127.0.0.1', port: 0, token: 'turn-test-token' });
+  const base = `http://127.0.0.1:${srv.port}`;
+  try {
+    const health = await httpJson(`${base}/health`);
+    check('/turn 健康检查免鉴权', health.json?.ok === true && health.json?.app === 'yuer-turn', `v${health.json?.version}`);
+
+    const noauth = await httpJson(`${base}/turn`, { method: 'POST', body: '{}' });
+    check('/turn 无 token 拒绝', noauth.status === 401, String(noauth.status));
+
+    const res = await httpJson(`${base}/turn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-turn-token': 'turn-test-token' },
+      body: JSON.stringify({ conv: 'private:20001', user: { id: 20001, name: '主人' }, text: '在吗' }),
+    });
+    check(
+      '/turn 返回气泡数组',
+      res.status === 200 && res.json?.ok === true && Array.isArray(res.json?.segments) && res.json.segments.length >= 1,
+      `${res.json?.segments?.length} 段：${res.json?.segments?.[0]}`,
+    );
+
+    const empty = await httpJson(`${base}/turn`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-turn-token': 'turn-test-token' },
+      body: JSON.stringify({ conv: 'private:20001', text: '   ' }),
+    });
+    check('/turn 空文本返回 400', empty.status === 400, String(empty.status));
+  } finally {
+    await srv.close();
+  }
 }
 
 /* ------------------------------ 气泡拆分自测 ------------------------------- */
@@ -700,6 +859,23 @@ async function testAgency() {
   n = sent.length;
   await scheduler.tick();
   check('静默时段群里不插话', sent.length === n);
+
+  // 13.6 主人手动 /解禁：清掉冷却与反感度（QQ 群号至少 5 位，这里用 90001）
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:90001', fakeNow);
+    g.cooldownUntil = fakeNow.getTime() + 3_600_000;
+    g.annoyance = 70;
+    g.impulse = 0;
+    await groupsMod.saveGroups(db);
+    await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '/解禁 90001' } }] }));
+    const after = (await groupsMod.loadGroups(fakeNow)).groups['group:90001'];
+    check(
+      '主人 /解禁 清掉群冷却',
+      Number(after.cooldownUntil) === 0 && Number(after.annoyance) === 0 && segText(last()?.segments ?? '').includes('解禁了'),
+      `annoyance=${after.annoyance}，cooldownUntil=${after.cooldownUntil}`,
+    );
+  }
 }
 
 async function testBackup() {

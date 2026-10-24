@@ -44,6 +44,10 @@ const HELP_TEXT = [
   '/空间        看她 QQ 空间在不在用、今天发没发',
   '/空间 发 内容 手动发一条纯文字说说（仅主人）',
   '/空间 关     让她别碰空间（不发也不看），/空间 开 恢复',
+  '/看到        她最近刷到/看到的事（说说、B 站、抖音）',
+  '/忘记 关键词 让她忘掉相关的语义记忆',
+  '/我是谁      看她对自己的认识',
+  '/解禁 [群号] 清掉某个群的“反感度冷却”（默认当前群）',
   '/ping        测一下我还在不在',
   '其它任何话都会被她当成聊天。',
 ].join('\n');
@@ -468,16 +472,126 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
 
     if (['记忆', 'memory'].includes(cmd)) {
       const n = Number(arg) > 0 ? Math.min(Number(arg), 20) : 3;
-      const r = await recentMessages(petId, n * 2, { surface: msg.kind, conv });
+      let api = null;
+      try {
+        api = await import('./lib/pet-api.mjs');
+      } catch {
+        /* 本地后端没有记忆分层，退化成只回放原文 */
+      }
+      const [r, sum] = await Promise.all([
+        recentMessages(petId, n * 2, { surface: msg.kind, conv }),
+        typeof api?.memorySummary === 'function' ? api.memorySummary(petId, { surface: msg.kind, conv }) : null,
+      ]);
       const msgs = Array.isArray(r?.messages) ? r.messages.slice(-n * 2) : [];
-      if (!msgs.length) {
+      const summary = typeof sum?.summary === 'string' ? sum.summary.trim() : '';
+      if (!msgs.length && !summary) {
         await sendText(msg, '记忆还是空白的。');
         return true;
       }
-      const txt = msgs
-        .map((x) => `${x.role === 'user' ? '你' : '她'}：${String(x.content).slice(0, 120)}`)
-        .join('\n');
-      await sendText(msg, txt);
+      const lines = [];
+      if (summary) lines.push(`【压缩记忆】${summary.slice(0, 400)}`, '');
+      lines.push(
+        ...msgs.map((x) => `${x.role === 'user' ? '你' : '她'}：${String(x.content).slice(0, 120)}`),
+      );
+      await sendText(msg, lines.join('\n').trim());
+      return true;
+    }
+
+    // 她最近刷到/看到的事（L3 语义记忆：说说、B 站、抖音热搜）
+    if (['看到', 'seen'].includes(cmd)) {
+      try {
+        const api = await import('./lib/pet-api.mjs');
+        const r = typeof api.seenNotes === 'function' ? await api.seenNotes(Number(arg) > 0 ? Number(arg) : 8) : null;
+        const notes = Array.isArray(r?.notes) ? r.notes : [];
+        if (!notes.length) {
+          await sendText(msg, '最近没看到什么，脑子空空的。');
+          return true;
+        }
+        await sendText(
+          msg,
+          notes
+            .map((x) => {
+              const d = new Date(x.at);
+              return `${d.getMonth() + 1}/${d.getDate()} ${String(x.text).slice(0, 90)}`;
+            })
+            .join('\n'),
+        );
+      } catch (e) {
+        log.warn(`/看到 失败：${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    // /忘记 关键词——只删语义记忆（她说看到/记住的事），对话原文不动
+    if (['忘记', 'forget'].includes(cmd)) {
+      const word = arg.trim();
+      if (!word) {
+        await sendText(msg, '要忘掉哪个词？比如：/忘记 空调');
+        return true;
+      }
+      try {
+        const api = await import('./lib/pet-api.mjs');
+        const r = typeof api.forgetNotes === 'function' ? await api.forgetNotes(word) : null;
+        await sendText(msg, r ? `忘了 ${r.removed} 条跟「${word}」有关的记忆。` : '这版后端不支持 /忘记。');
+      } catch (e) {
+        await sendText(msg, `没忘成：${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    // /我是谁——自我模型（≤220 字，一天最多变一次）
+    if (['我是谁', 'self'].includes(cmd)) {
+      try {
+        const api = await import('./lib/pet-api.mjs');
+        const r = typeof api.selfState === 'function' ? await api.selfState() : null;
+        const text = r?.self?.text ? String(r.self.text) : '';
+        await sendText(msg, text ? `【我】${text}` : '还没形成对自己的认识，再聊一阵子就有了。');
+      } catch (e) {
+        log.warn(`/我是谁 失败：${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    // 群里被触发反感度冷却后，主人可以手动解禁（否则要等 12h/7d）
+    if (['解禁', '解冷却', 'unmute'].includes(cmd)) {
+      try {
+        const g = await import('./lib/groups.mjs');
+        const db = await g.loadGroups();
+        const all = db.groups || {};
+        const listOf = () =>
+          Object.entries(all)
+            .map(([k, v]) => {
+              const left = Number(v.cooldownUntil || 0) > Date.now()
+                ? `冷却到 ${new Date(Number(v.cooldownUntil)).toLocaleString('zh-CN', { hour12: false })}`
+                : '没在冷却';
+              return `  · ${k.replace(/^group:/, '群 ')}：反感 ${Math.round(Number(v.annoyance || 0))}，冲动 ${Math.round(Number(v.impulse || 0))}，${left}`;
+            })
+            .sort()
+            .join('\n');
+        const target = (arg.replace(/^群\s*/, '') || (msg.kind === 'group' ? msg.groupId : '')).trim();
+        if (!target) {
+          await sendText(msg, ['各群状态：', listOf() || '  （还没有任何群的记录）', '', '发「/解禁 群号」清掉某个群的冷却与反感度。'].join('\n'));
+          return true;
+        }
+        if (!/^\d{5,}$/.test(target)) {
+          await sendText(msg, '群号得是数字哦，比如：/解禁 1106592574');
+          return true;
+        }
+        const key = `group:${target}`;
+        const st = g.groupState(db, key);
+        const before = { annoyance: Math.round(Number(st.annoyance || 0)), cool: Number(st.cooldownUntil || 0) };
+        st.annoyance = 0;
+        st.cooldownUntil = 0;
+        st.impulse = 0;
+        st.afterSpeak = { at: 0, count: 0 };
+        await g.saveGroups(db);
+        const was = before.cool > Date.now() ? '在冷却中' : '本来没冷却';
+        log.info(`手动解禁 ${key}（${was}，反感 ${before.annoyance} → 0，by ${msg.senderName}/${msg.senderId}）`);
+        await sendText(msg, `群 ${target} 解禁了（${was}，反感 ${before.annoyance} → 0）。她得再攒够冲动才会插话。`);
+      } catch (e) {
+        log.warn(`/解禁 失败：${e?.message ?? e}`);
+        await sendText(msg, '这个后端没有群状态（本机版没有群注意力）。');
+      }
       return true;
     }
 
