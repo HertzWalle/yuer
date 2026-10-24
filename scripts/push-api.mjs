@@ -40,7 +40,7 @@ function fail(msg) {
   process.exit(1);
 }
 
-async function api(path, init = {}) {
+async function api(path, init = {}, { soft = false } = {}) {
   const res = await fetch(path.startsWith('http') ? path : API + path, {
     ...init,
     headers: {
@@ -59,6 +59,7 @@ async function api(path, init = {}) {
     /* 非 JSON（多半是错误页） */
   }
   if (!res.ok) {
+    if (soft) return { __error: { status: res.status, message: json?.message ?? text.slice(0, 200) } };
     fail(`${init.method || 'GET'} ${path} → ${res.status} ${json?.message ?? text.slice(0, 200)}`);
   }
   return json;
@@ -185,7 +186,13 @@ async function makeTag(commitSha, treeSha) {
     method: 'POST',
     body: JSON.stringify({ tag: `v${version}`, message: `v${version}`, object: commitSha, type: 'commit', tagger: author }),
   });
-  await api('/git/refs', { method: 'POST', body: JSON.stringify({ ref, sha: tag.sha }) });
+  const created = await api('/git/refs', { method: 'POST', body: JSON.stringify({ ref, sha: tag.sha }) }, { soft: true });
+  if (created?.__error?.status === 422) {
+    // 标签已存在（发版重打）：把标签挪到新的提交上
+    await api(`/git/refs/tags/v${version}`, { method: 'PATCH', body: JSON.stringify({ sha: tag.sha, force: true }) });
+    console.log(`✓ tag v${version} 已移动到 ${commitSha.slice(0, 8)}`);
+    return;
+  }
   console.log(`✓ tag v${version} → ${commitSha.slice(0, 8)}`);
 }
 
