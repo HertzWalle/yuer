@@ -341,6 +341,26 @@ function bucketOf(petId, kind, conv) {
  *
  * bias（0~1，pet.json 的 splitChance）整体调「爱不爱拆」：越大越愿意拆。
  */
+/**
+ * 收尾整理：模型偶尔会把「（尾巴摇成螺旋桨）」单独发成一条，
+ * 真人不会这样——纯动作的短句并到上一条，开头的纯动作直接丢掉。
+ */
+export function tidyBubbles(segments = []) {
+  const out = [];
+  for (const raw of segments) {
+    const s = String(raw ?? '').trim();
+    if (!s) continue;
+    const actionOnly = /^[（(][^（()）]{1,40}[)）]$/u.test(s);
+    if (actionOnly) {
+      if (!out.length) continue;
+      out[out.length - 1] = out[out.length - 1] + ' ' + s;
+      continue;
+    }
+    out.push(s);
+  }
+  return out.length ? out : segments;
+}
+
 export function splitBubbles(text, { max = 6, bias = 0.5, rng = Math.random } = {}) {
   const raw = String(text ?? '');
   let parts = normalizeParts(raw);
@@ -583,7 +603,7 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
   const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(conf.maxBubbles) || 6)));
   const bias = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
-  const segments = splitBubbles(finalText, { max: maxBubbles, bias });
+  const segments = tidyBubbles(splitBubbles(finalText, { max: maxBubbles, bias }));
   const stored = (segments.length ? segments.join(' ') : finalText).trim();
 
   await appendMessages(ENTRY, bucket, [

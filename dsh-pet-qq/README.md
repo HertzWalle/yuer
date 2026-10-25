@@ -95,6 +95,7 @@ ssh ubuntu@124.220.183.169 "cd /tmp && node set-profile.mjs --avatar /tmp/avatar
 | 3 | `lin` | 凛 | 毒舌女仆长，毒舌但办事靠谱 |
 | 4 | `zhixia` | 知夏 | 温柔学姐，慢一点，会记得你上次说的 |
 | 5 | `niyujie` | 你鱼姐 | 蓝发大鲸鱼、群聊老资历，随手打字的懒散阴阳，损事不损人（来源 `persona-dafeiyu/你鱼姐.md`） |
+| 6 | `mingyue` | 溟月 | 赛博蓝鲸、第七机房社畜，抱着印「饭」字的碗讨饭，嘴硬尾巴软，怕被遗忘（来源 `persona-dafeiyu/溟月·DSH.md`） |
 
 ### 群聊 / 私聊各用各的人格（还能给每个群单独设）
 

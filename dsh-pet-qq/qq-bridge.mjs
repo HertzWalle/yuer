@@ -857,14 +857,36 @@ function connectOneBot({ conf, onEvent, log }) {
     }
   };
 
-  const open = () => {
-    if (closedByUs) return;
+  let retryTimer = null;
+  let connecting = false;
+  let online = false;
+
+  /**
+   * 断线重连：以前只在 close 里重试，而握手失败只会触发 error、不会触发 close，
+   * 于是桥就「安静地死」在那里——现在 error / close / 心跳巡检三条路都能触发重连。
+   */
+  const scheduleReconnect = (why = '断开') => {
+    if (closedByUs || retryTimer) return;
     attempt += 1;
-    log.info(`连接 OneBot：${url.origin}${url.pathname}（第 ${attempt} 次）`);
+    const delay = Math.min(60_000, 1000 * 2 ** Math.min(attempt - 1, 6)) + Math.floor(Math.random() * 400);
+    log.warn(`OneBot ${why}，${Math.round(delay / 100) / 10}s 后重连（第 ${attempt} 次）`);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      open();
+    }, delay);
+    retryTimer.unref?.();
+  };
+
+  const open = () => {
+    if (closedByUs || connecting || online) return;
+    connecting = true;
+    log.info(`连接 OneBot：${url.origin}${url.pathname}（第 ${attempt + 1} 次）`);
     ws = new WebSocket(url.toString());
 
     ws.addEventListener('open', () => {
       attempt = 0;
+      connecting = false;
+      online = true;
       log.info('OneBot WS 已连接');
     });
 
@@ -887,17 +909,29 @@ function connectOneBot({ conf, onEvent, log }) {
       onEvent(data);
     });
 
-    ws.addEventListener('error', () => {
-      log.warn('OneBot WS 连接错误（详情见下一条 error 日志或框架侧）');
+    ws.addEventListener('error', (ev) => {
+      connecting = false;
+      online = false;
+      const detail = ev?.message ?? ev?.error?.message ?? ev?.type ?? '未知';
+      log.warn(`OneBot WS 连接错误：${detail}`);
+      scheduleReconnect('连不上');
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (ev) => {
+      connecting = false;
+      online = false;
       if (closedByUs) return;
-      const delay = Math.min(30000, 2000 * attempt);
-      log.warn(`OneBot WS 关闭，${delay / 1000}s 后重连`);
-      setTimeout(open, delay);
+      log.warn(`OneBot WS 关闭（code=${ev?.code ?? '?'}${ev?.reason ? `，${ev.reason}` : ''}）`);
+      scheduleReconnect('已断开');
     });
   };
+
+  // 心跳巡检：万一 error/close 都没来（半开连接），每分钟兜底看一眼
+  const watchdog = setInterval(() => {
+    if (closedByUs || online || connecting || retryTimer) return;
+    scheduleReconnect('巡检发现离线');
+  }, 60_000);
+  watchdog.unref?.();
 
   return {
     sendMsg,
@@ -905,11 +939,16 @@ function connectOneBot({ conf, onEvent, log }) {
     start: open,
     stop: () => {
       closedByUs = true;
+      clearInterval(watchdog);
+      if (retryTimer) clearTimeout(retryTimer);
       try {
         ws?.close();
       } catch {
         /* ignore */
       }
+    },
+    get online() {
+      return online;
     },
     get selfId() {
       return selfId;

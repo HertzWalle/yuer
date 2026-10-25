@@ -614,6 +614,15 @@ async function testBubbles() {
 
   const many = splitBubbles('第一句\n第二句\n第三句\n第四句\n第五句\n第六句\n第七句\n第八句\n第九句');
   check('气泡软上限 6 条', many.length === 6, `${many.length} 条`);
+
+  // 纯动作的短句不该单独成条（模型偶尔会这样）
+  const { tidyBubbles } = petApi;
+  const tidied = tidyBubbles(['主人你回来啦。', '（尾巴摇成螺旋桨）', '（耳朵抖了抖）', '饭饭呢？']);
+  check(
+    '纯动作并到上一条、开头动作丢弃',
+    tidied.length === 2 && tidied[0].includes('尾巴摇成螺旋桨') && tidied[1] === '饭饭呢？',
+    JSON.stringify(tidied),
+  );
 }
 
 /* --------------------------- 表情包冷却（生成层） ---------------------------- */
