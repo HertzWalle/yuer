@@ -76,7 +76,7 @@ const IGNORE_FILES = [
   /^state\.json$/,
   /^commitments\.json$/,
   /^usage\.jsonl$/,
-  /^bot\.env$/,
+  /^bot\.env$/, /^qrcode.*\.png$/, /^qrcode\.ps1$/,
   /^turn\.token$/,
 ];
 

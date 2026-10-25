@@ -35,3 +35,5 @@ __pycache__/
 *.log
 .npm-cache/
 dsh-pet-qq/turn.token
+# 登录二维码是一次性的，别进仓库
+qrcode*.png
