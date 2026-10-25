@@ -115,6 +115,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
   let quoteId = '';
   const parts = [];
   const ats = []; // 这条消息 @ 了谁（qq + 客户端给的名字），群聊里随后换成群昵称
+  const images = []; // 这条消息里的图片地址（交给视觉模型看图）
 
   if (segs) {
     for (const s of segs) {
@@ -129,7 +130,11 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
           ats.push({ qq, name });
           parts.push(`@${name || qq}`);
         }
-      } else if (type === 'image') parts.push('[图片]');
+      } else if (type === 'image') {
+        parts.push('[图片]');
+        const u = String(d.url || d.file || '').trim();
+        if (u) images.push(u);
+      }
       else if (type === 'face' || type === 'mface') parts.push('[表情]');
       else if (type === 'reply') quoteId = String(d.id ?? '');
       // record / video / file / json / xml 等：不参与对话正文
@@ -172,6 +177,7 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
     quoteId,
     atMe,
     ats,
+    images,
     observeOnly,
     text,
   };
@@ -230,11 +236,17 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       return null;
     }
     const text = segmentsToPlain(data?.message).slice(0, 200);
-    if (!text) return null;
+    const segs = Array.isArray(data?.message) ? data.message : [];
+    const quoteImages = segs
+      .filter((s) => s?.type === 'image')
+      .map((s) => String(s?.data?.url || s?.data?.file || '').trim())
+      .filter(Boolean);
+    if (!text && !quoteImages.length) return null;
     const quote = {
       at: Date.now(),
       name: sep(data?.sender?.card) || sep(data?.sender?.nickname) || String(data?.sender?.user_id ?? '某人'),
       text,
+      images: quoteImages,
       isSelf: String(data?.sender?.user_id ?? '') === String(msg.selfId ?? ''),
     };
     if (quoteCache.size > 200) quoteCache.clear();
@@ -242,6 +254,77 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     return quote;
   }
 
+  /* ----------------------------- 看图（图片 → 文字） ----------------------------- */
+
+  const imageBuf = new Map(); // conv → [{ at, from, url, desc }]
+  const IMAGE_TTL = 20 * 60_000;
+  const IMAGE_KEEP = 3;
+
+  const apiLib = async () => {
+    try {
+      return await import('./lib/pet-api.mjs');
+    } catch {
+      return null;
+    }
+  };
+
+  /** 一张图 → 一句中文描述；任何失败都返回 null，绝不挡回复 */
+  async function describe(url) {
+    if (!url) return null;
+    const api = await apiLib();
+    if (typeof api?.describeImage !== 'function') return null;
+    try {
+      return await api.describeImage(url);
+    } catch (e) {
+      log.warn(`看图失败：${e?.message ?? e}`);
+      return null;
+    }
+  }
+
+  const convOf = (msg) => (msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`);
+
+  /** 记一笔「这个会话刚有谁发了图」，供后面「这样」这类指代使用 */
+  function rememberImage(msg) {
+    const urls = Array.isArray(msg.images) ? msg.images : [];
+    if (!urls.length) return;
+    const key = convOf(msg);
+    const list = (imageBuf.get(key) ?? []).filter((x) => Date.now() - x.at < IMAGE_TTL);
+    for (const url of urls.slice(0, 3)) list.push({ at: Date.now(), from: msg.senderName, url, desc: '' });
+    while (list.length > IMAGE_KEEP) list.shift();
+    imageBuf.set(key, list);
+  }
+
+  /** 当前这条消息里的图：看懂了就写进正文（[图片：…]） */
+  async function describeIncoming(msg) {
+    const urls = Array.isArray(msg.images) ? msg.images : [];
+    if (!urls.length) return;
+    const descs = [];
+    for (const url of urls.slice(0, 2)) {
+      const d = await describe(url);
+      if (d) descs.push(d);
+    }
+    if (!descs.length) return;
+    let i = 0;
+    msg.text = String(msg.text).replace(/\[图片\]/g, () => (i < descs.length ? `[图片：${descs[i++]}…]` : '[图片]'));
+  }
+
+  /** 会话里最近发过的图（含被引用的那张）——模型才接得住「这样」「这个」 */
+  async function recentImagesBrief(msg, quote) {
+    const key = convOf(msg);
+    const list = (imageBuf.get(key) ?? []).filter((x) => Date.now() - x.at < IMAGE_TTL);
+    const picked = list.slice(-2);
+    const quoteUrl = quote?.images?.[0];
+    if (quoteUrl && !picked.some((x) => x.url === quoteUrl)) {
+      picked.push({ at: Date.now(), from: quote.name, url: quoteUrl, desc: '' });
+    }
+    const lines = [];
+    for (const item of picked) {
+      if (!item.desc) item.desc = (await describe(item.url)) || '';
+      if (item.desc) lines.push(`- ${item.from} 发过一张图：${clip(item.desc, 90)}`);
+    }
+    if (!lines.length) return '';
+    return `【这个会话里刚发过的图】最近真有人发过这些图，对方说「这样」「这个」时先对到这里来：\n${lines.join('\n')}`;
+  }
   /* -------------------- 群成员称呼（群昵称，不拿 QQ 号凑数） -------------------- */
 
   const memberCache = new Map(); // `${groupId}:${userId}` → { at, name }
@@ -319,11 +402,14 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
   async function promptInput(msg, quote) {
     const who = isOwner(msg.senderId) ? `${msg.senderName}·主人` : msg.senderName;
     const head = msg.kind === 'group' ? `【${who}】` : '';
+    await describeIncoming(msg);
     const note = await groupSpeakerNote(msg);
+    const brief = await recentImagesBrief(msg, quote);
     const body = !quote
       ? `${head}${msg.text}`
       : `${head}（${quote.isSelf ? '引用了你自己刚才说的话' : `引用了${quote.name}的话`}：「${clip(quote.text, 120)}」）\n${msg.text}`;
-    return note ? `${note}\n${body}` : body;
+    const parts = [note, brief, body].filter(Boolean);
+    return parts.join('\n');
   }
 
   const quoteMode = String(behavior.quoteReply ?? 'auto').toLowerCase();
@@ -757,6 +843,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       try {
         // 群里先把 @QQ号 换成群昵称（模型不该看见一串数字）
         await resolveAtNames(msg);
+        rememberImage(msg);
         // 群里的每条消息都喂给调度器「旁听」：不 @ 她也会攒冲动，由调度器决定要不要插话
         if (msg.kind === 'group' && scheduler?.onGroupMessage) {
           try {

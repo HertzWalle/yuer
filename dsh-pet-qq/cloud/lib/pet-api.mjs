@@ -22,6 +22,7 @@ import { notesBrief, recall, recentNotes, seenBrief, touch } from './semantic.mj
 import { loadSummary, manageHistory, selfBrief } from './memory-manager.mjs';
 import { extractChatImage, imageInstruction, limitPool, readMemePool, resolveMemeFile } from './memes.mjs';
 import { chatCompletion } from './llm.mjs';
+import { describeImage } from './vision.mjs';
 import {
   PATHS,
   appendMessages,
@@ -316,7 +317,7 @@ const REPLY_STYLE =
   '\n\n【回复方式】像在 QQ 上跟人聊天：' +
   '想连发就分成 2~4 条短句（用换行隔开，每条尽量 20 字以内）；' +
   '想一口气说完就整段一条，别为了拆而拆。' +
-  '不管几条，先给结论，别写成公文，也别用列表符号。';
+  '不管几条，先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。';
 
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
@@ -341,6 +342,23 @@ function bucketOf(petId, kind, conv) {
  *
  * bias（0~1，pet.json 的 splitChance）整体调「爱不爱拆」：越大越愿意拆。
  */
+/**
+ * 括号里的动作旁白一律抹掉：真人 QQ 聊天不打「（歪头）」「（尾巴摇起来）」。
+ * 情绪靠语气词和句子本身，只有确实像动作的括号才删，别误伤「（DeepSeek）」这种专有名词。
+ */
+const ACTION_WORDS =
+  /尾巴|耳朵|鳍耳|鲸尾|眼镜|围裙|饭碗|碗|机柜|抬头|低头|歪头|点头|摇头|摇|抖|拍|缩|抱|推|凑|愣|叹气|鼓|戳|蹭|甩|眨|转身|伸|趴|躺|跳|挥手|嘟嘴|撇嘴|摸|揉|挠|戳/;
+
+export function stripActionNotes(text) {
+  const s = String(text ?? '');
+  if (!s) return s;
+  const out = s
+    .replace(/[（(][^（()）]{1,60}[)）]/gu, (m) => (ACTION_WORDS.test(m.slice(1, -1)) ? '' : m))
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/ +([，,。！？!?…~～])/g, '$1')
+    .trim();
+  return out || s;
+}
 /**
  * 收尾整理：模型偶尔会把「（尾巴摇成螺旋桨）」单独发成一条，
  * 真人不会这样——纯动作的短句并到上一条，开头的纯动作直接丢掉。
@@ -603,7 +621,7 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
   const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(conf.maxBubbles) || 6)));
   const bias = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
-  const segments = tidyBubbles(splitBubbles(finalText, { max: maxBubbles, bias }));
+  const segments = tidyBubbles(splitBubbles(stripActionNotes(finalText), { max: maxBubbles, bias }));
   const stored = (segments.length ? segments.join(' ') : finalText).trim();
 
   await appendMessages(ENTRY, bucket, [
@@ -675,6 +693,8 @@ export async function getState() {
  * 表情包原图：data/memes/<名称>.png|gif|jpg… 或 data/memes/<名称>/ 里的随机一张。
  * 缺失返回 null（桥会退化成一句文字提示）。
  */
+export { describeImage };
+
 export async function fetchMemeImage(name, entry = 'main') {
   const key = String(name ?? '').trim();
   if (!key) return null;

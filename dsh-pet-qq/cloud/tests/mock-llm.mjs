@@ -31,7 +31,28 @@ export function startMockLlm({ port = 0 } = {}) {
       const messages = Array.isArray(body.messages) ? body.messages : [];
       calls.push({ at: Date.now(), body, messages });
       const user = [...messages].reverse().find((m) => m?.role === 'user');
-      const text = String(user?.content ?? '');
+      const content = user?.content;
+      const hasImage =
+        Array.isArray(content) && content.some((c) => c && (c.type === 'image_url' || c.image_url));
+      if (hasImage) {
+        const payload = {
+          id: 'mock-vision-' + Date.now(),
+          object: 'chat.completion',
+          model: body.model || 'mock',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: '（假视觉）图里是一张蓝色鲸鱼娘的表情包，配字「这样」。' },
+              finish_reason: 'stop',
+            },
+          ],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        };
+        const buf = Buffer.from(JSON.stringify(payload));
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': buf.length }).end(buf);
+        return;
+      }
+      const text = String(content ?? '');
       // 去掉配图指令，只回显用户原话
       const clean = text.split('\n\n[配图]')[0].trim();
       // 去掉「谁在说话」这类系统提示行，只回显对话正文（测试断言看的是正文）

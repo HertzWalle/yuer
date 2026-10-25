@@ -425,6 +425,7 @@ async function main() {
   }
 
   await testBubbles();
+  await testVisionAndActions();
   await testMemeCooldown();
   await testPersonaMark();
   await testQzoneHelpers();
@@ -625,6 +626,52 @@ async function testBubbles() {
   );
 }
 
+/* --------------------- 看图 + 去掉括号动作（m05662 两条需求） --------------------- */
+
+async function testVisionAndActions() {
+  const { stripActionNotes } = petApi;
+
+  const stripped = stripActionNotes('主人你回来啦（尾巴摇成螺旋桨）');
+  check('括号动作被抹掉', stripped === '主人你回来啦', JSON.stringify(stripped));
+  const keep = stripActionNotes('这是（DeepSeek）的模型');
+  check('专有名词的括号保留', keep.includes('（DeepSeek）'), JSON.stringify(keep));
+
+  // 看图：私聊发一张 data: 图，假的视觉端点会回一句描述
+  const png =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  const before1 = mock.calls.length;
+  await bridge.handleEvent(
+    ev({ message: [{ type: 'text', data: { text: '你看这个' } }, { type: 'image', data: { url: png } }] }),
+  );
+  const seen1 = mock.calls
+    .slice(before1)
+    .map((c) => JSON.stringify(c.messages))
+    .join('\n');
+  check('图片被看懂并写进上下文', seen1.includes('[图片：') || seen1.includes('假视觉'), seen1.slice(-200));
+
+  // 引用一条带图的消息：要把「那张图是什么」也带进上下文
+  const before = mock.calls.length;
+  quoted.set('903', {
+    sender: { user_id: 10000, nickname: '鱼儿' },
+    message: [
+      { type: 'text', data: { text: '你看这个' } },
+      { type: 'image', data: { url: png } },
+    ],
+  });
+  await bridge.handleEvent(
+    ev({
+      message_type: 'group',
+      group_id: 1106592574,
+      sender: { user_id: 3114694568, nickname: '搬砖king' },
+      message: [
+        { type: 'reply', data: { id: '903' } },
+        { type: 'text', data: { text: '你会变成这样吗' } },
+      ],
+    }),
+  );
+  const seen = mock.calls.slice(before).map((c) => JSON.stringify(c.messages)).join('\n');
+  check('引用的图也被看懂', seen.includes('发过一张图') || seen.includes('图片：'), seen.slice(-160));
+}
 /* --------------------------- 表情包冷却（生成层） ---------------------------- */
 
 async function testMemeCooldown() {

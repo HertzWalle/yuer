@@ -332,6 +332,18 @@ node cloud/build.mjs
 
 分类英文 key 到中文名的映射在 `cloud/import-memes.mjs` 顶部的 `LABELS`；manifest 里有几个 key 带零宽字符，脚本已按清洗后的 key 匹配。
 
+### 看图（图片不再只是「[图片]」）
+
+她真的会看图：消息里的图片会先被视觉模型读成一句中文，再进上下文。
+
+- **实现**：`cloud/lib/vision.mjs` 的 `describeImage(url)`——下载图片（单张 ≤4MB、15s 超时）→ base64 塞进
+  `image_url` → 一句话描述；按 URL 的 sha1 缓存 7 天（`data/vision-cache.json`，最多 300 条），同一张图只花一次钱。
+- **三种入口**：①这条消息带的图 → 正文里写成 `[图片：…]`；②被引用的消息带图 → 连同「那张图是什么」一起给模型；
+  ③每个会话记最近 3 张图（20 分钟），回话时附一段「这个会话里刚发过的图」，解决「这样」「这个」指向不明。
+- **省钱**：旁听（没 @ 她）的群消息不识别，等真要接话时才按需看图。
+- **降级**：看图失败（链接过期、超时、格式不认）就退回 `[图片]`，绝不因为看图失败而不回消息。
+- **不再写舞台指示**：`stripActionNotes()` 会抹掉「（歪头）」「（尾巴摇了一下）」这类括号动作，
+  情绪靠语气词和句子本身（「本鲸尾巴都翘起来了」）；「（DeepSeek）」这种专有名词的括号保留。
 ### 对话节奏（像真人那样连发几条）
 
 一条回复可以是一整段、也可以是 **2~6 个气泡**，条数由内容决定，不再写死：
@@ -390,6 +402,7 @@ node cloud/build.mjs
 | `cloud/remote-deploy-v6.sh` | 服务器侧一键：v1.4 按群人格（`surfaces.groups`）+ 重启 |
 | `cloud/remote-deploy-v7.sh` | 服务器侧一键：v1.5 引用回复（补 `behavior.quoteReply`）+ 重启 |
 | `cloud/lib/feeds.mjs` | B 站热门 + 抖音热搜聚合：抓取、解析、压成一行语义记忆 |
+| `cloud/lib/vision.mjs` | 看图：图片 → 一句中文描述（按 URL 缓存 7 天） |
 | `cloud/lib/memory-manager.mjs` | L2 压缩摘要（落盘 `data/summaries/`）+ 自我模型（`data/self.json`，24h/drift 双闸） |
 | `cloud/lib/turn-server.mjs` | S4 的 `POST /turn` 契约（token 鉴权、默认只听回环） |
 | `cloud/lib/version.mjs` | 读 `VERSION` 给 `/health` 用 |
