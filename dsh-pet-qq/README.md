@@ -332,6 +332,17 @@ node cloud/build.mjs
 
 分类英文 key 到中文名的映射在 `cloud/import-memes.mjs` 顶部的 `LABELS`；manifest 里有几个 key 带零宽字符，脚本已按清洗后的 key 匹配。
 
+### 掉线自愈与告警（watchdog）
+
+QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token 过期，NapCat 就只能重新扫码。之前这种掉线
+是「安静的」——桥每分钟重连一次、日志刷屏，人却不知道。
+
+- **桥侧**：重连日志前 5 次逐条记、之后每 10 次一条，并带上「已断开 N 分钟」；
+  第 20 次、第 60 次（≈1 小时）各打一条 `ERROR` 提示「需要重新扫码」；恢复时打印「断了约 N 分钟」。
+- **主机侧**：`cloud/watchdog/yuer-watchdog.sh` + systemd timer，每 5 分钟检查 `127.0.0.1:3001`；
+  连续 4 次不通就 `docker restart napcat`（最多 1 次/小时），日志在 `/var/log/yuer-watchdog.log`。
+  登录态还在时它能自己救回来；掉登录时它会生成新二维码，人扫码后桥自动接上。
+- **人工恢复**：本地跑 `refresh-qr.ps1` 拿新码扫码即可，不用动服务器。
 ### 看图（图片不再只是「[图片]」）
 
 她真的会看图：消息里的图片会先被视觉模型读成一句中文，再进上下文。
@@ -403,6 +414,7 @@ node cloud/build.mjs
 | `cloud/remote-deploy-v7.sh` | 服务器侧一键：v1.5 引用回复（补 `behavior.quoteReply`）+ 重启 |
 | `cloud/lib/feeds.mjs` | B 站热门 + 抖音热搜聚合：抓取、解析、压成一行语义记忆 |
 | `cloud/lib/vision.mjs` | 看图：图片 → 一句中文描述（按 URL 缓存 7 天） |
+| `cloud/watchdog/` | systemd timer：3001 不通就重启 NapCat（最多 1 次/小时） |
 | `cloud/lib/memory-manager.mjs` | L2 压缩摘要（落盘 `data/summaries/`）+ 自我模型（`data/self.json`，24h/drift 双闸） |
 | `cloud/lib/turn-server.mjs` | S4 的 `POST /turn` 契约（token 鉴权、默认只听回环） |
 | `cloud/lib/version.mjs` | 读 `VERSION` 给 `/health` 用 |

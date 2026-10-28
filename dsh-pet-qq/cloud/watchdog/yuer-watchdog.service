@@ -1,0 +1,7 @@
+[Unit]
+Description=yuer OneBot watchdog (restart NapCat when 3001 is down)
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/yuer-watchdog.sh

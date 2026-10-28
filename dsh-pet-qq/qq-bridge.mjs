@@ -947,6 +947,7 @@ function connectOneBot({ conf, onEvent, log }) {
   let retryTimer = null;
   let connecting = false;
   let online = false;
+  let downSince = 0; // 第一次连不上/断开的时间，用来算「已经断了多久」
 
   /**
    * 断线重连：以前只在 close 里重试，而握手失败只会触发 error、不会触发 close，
@@ -955,8 +956,15 @@ function connectOneBot({ conf, onEvent, log }) {
   const scheduleReconnect = (why = '断开') => {
     if (closedByUs || retryTimer) return;
     attempt += 1;
+    if (!downSince) downSince = Date.now();
     const delay = Math.min(60_000, 1000 * 2 ** Math.min(attempt - 1, 6)) + Math.floor(Math.random() * 400);
-    log.warn(`OneBot ${why}，${Math.round(delay / 100) / 10}s 后重连（第 ${attempt} 次）`);
+    // 长时间连不上时别每分钟刷一行：前 5 次每次都记，之后每 10 次记一行，并提示可能需要重新扫码
+    if (attempt <= 5 || attempt % 10 === 0) {
+      const minutes = Math.max(1, Math.round((Date.now() - downSince) / 60_000));
+      log.warn(`OneBot ${why}，${Math.round(delay / 100) / 10}s 后重连（第 ${attempt} 次，约 ${minutes} 分钟未连通）`);
+      if (attempt === 20) log.error('OneBot 已连续 20 次连不上：多半是 QQ 掉登录了，需要重新扫码（refresh-qr.ps1）');
+      if (attempt % 60 === 0) log.error('OneBot 已约 1 小时连不上：确认小号是否在别处登录/被踢，扫码后会自动恢复');
+    }
     retryTimer = setTimeout(() => {
       retryTimer = null;
       open();
@@ -974,6 +982,8 @@ function connectOneBot({ conf, onEvent, log }) {
       attempt = 0;
       connecting = false;
       online = true;
+      if (downSince) log.info(`OneBot 恢复连接（断了约 ${Math.max(1, Math.round((Date.now() - downSince) / 60_000))} 分钟）`);
+      downSince = 0;
       log.info('OneBot WS 已连接');
     });
 

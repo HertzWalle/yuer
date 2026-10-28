@@ -3,6 +3,30 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.9.1 — 掉线不再悄无声息（2026-10-28）
+
+### 修复：断连日志刷屏 + 无自愈
+
+10-27 14:51 NapCat 报 `Login Error, ErrType: 1`（QQ 掉登录），此后桥每 60 秒重连一次、连了 **2269 次**，
+日志刷了 1.5 天，人却不知道机器人早就下线了。
+
+- `qq-bridge.mjs`：重连日志改成「前 5 次每次都记，之后每 10 次记一行」；每行带「已断开多少分钟」；
+  第 20 次和第 60 次（≈1 小时）各打一条 `ERROR`，直接提示「QQ 掉登录了，需要重新扫码」；
+  恢复连接时打印「断了约 N 分钟」。
+- 新增主机层 watchdog（`cloud/watchdog/`，systemd timer，每 5 分钟）：
+  发现 `127.0.0.1:3001` 连续 4 次不通就 `docker restart napcat`（最多 1 次/小时，日志写 `/var/log/yuer-watchdog.log`）。
+  适用「登录态还在、WS 卡死」的情况；如果是掉登录，重启会生成新二维码，用户扫码即可恢复。
+
+### 部署
+
+```bash
+ssh ubuntu@<host>
+bash /tmp/remote-deploy-v8.sh
+# watchdog（一次性安装）
+sudo install -m 755 cloud/watchdog/yuer-watchdog.sh /usr/local/bin/
+sudo install -m 644 cloud/watchdog/yuer-watchdog.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now yuer-watchdog.timer
+```
 ## v1.9.0 — 看一眼再说话（2026-10-25）
 
 ### 新增：图片理解（`cloud/lib/vision.mjs`）
