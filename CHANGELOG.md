@@ -3,6 +3,56 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.11.0 — 像人一点：防串台、连发合并、说话人画像、规矩、账本、语音（2026-10-28）
+
+参考了 [ai-bot-groupmate](https://github.com/Canvixel-Eloweny/ai-bot-groupmate)（Apache-2.0）、
+[dafeiyu-config-pack](https://github.com/zexuanw958-svg/dafeiyu-config-pack) 的插件组合、
+`dsh-plugin-soul` / `dsh-plugin-memory` 和 `Smart-Memory` 的设计，只借结构、不搬代码。
+用户拍板：表情包概率 0.22（私聊）/ 0.08（群），语音用免费 Edge TTS，群聊四档配额直接生效。
+
+### 防串台：内部标记不出门（`cloud/lib/pet-api.mjs`）
+
+- `stripInternal()` 清 `<system_reminder>…</system_reminder>`、DSML/tool_call 标签、`[图:…]`、
+  `【回复方式 / 规矩 / 你想起来的 / 你最近看到的 / 现在的心情 / 说话的人】` 这类我们拼进 prompt 的段落。
+- 三处生效：模型输出后（`chat()`）、写记忆前、桥上出站前（`sendReply` 再兜一层）。
+
+### 连发合并（`qq-bridge.mjs`）
+
+- `behavior.coalesceMs`（默认 1600ms）：同一会话里连着发的几条合成一次请求，只回一次；
+  第一条当正文，后面几条附在「（他接着又发了几条，别一条条回，合起来说）」下面。
+- 指令不参与合并；旁听、画像、图片缓存这些即时动作仍在每条消息到达时立刻做。
+
+### 说话人画像（`cloud/lib/profiles.mjs` → `data/profiles.json`）
+
+- 每条群消息零成本统计：平均长度、爱提的词（含二元组，中文不用分词也能抓到「显卡」）、爱不爱 @ 人、上次说话时间。
+- 攒够 3 条才注入 `【说话的人】…`（≤2 行），群聊里带；`/画像` 看群里谁最活跃。
+
+### 心情与规矩进 system（`cloud/lib/agency.mjs`）
+
+- `moodBrief(mood)`：把 valence/arousal/clingy 翻成「轻快 / 低落就短句 / 可以提一句想他 / 困」的方向，只给方向不给数字。
+- `rules` 从「只记录」变成硬约束：`/规矩 别叫我大肥鱼`、`/规矩 删 1`、`/规矩`（最多 10 条，最旧的挤掉），
+  拼在 system 最前面，与人设冲突时按规矩。
+
+### 用量账本（`cloud/lib/usage.mjs` → `data/usage-YYYYMM.jsonl`）
+
+- `chatCompletion` 现在带回 `usage` 与真实 `model`；按 kind 记账：`chat`（回复）/ `proactive`（主动开口）/
+  `promise`（兑现承诺）/ `group`（群旁听、起草、开场）/ `mood`（说说）。
+- `/用量` 看今天、近 N 天、按 kind 明细与粗算成本；`/余额` 直接查 DeepSeek 余额。
+- 只记 token 数和场景，不记聊天正文。
+
+### 语音（Edge TTS，`cloud/lib/tts.mjs`）
+
+- 私聊里按概率（默认 15%）把回复念出来，发给 QQ 一条 `record` 语音；群里默认不说话（会吵）。
+- 念之前先洗掉动作、表情包标记、链接；超过 60 字只念前面一段。
+- 依赖服务器上有 `edge-tts` 与 `ffmpeg`；没装就安静退回纯文字，不影响聊天。
+
+### 其它
+
+- 温度默认 0.85（`DEEPSEEK_TEMPERATURE` 可覆盖）：实测比 1.0 更少乱编，又不至于端着。
+- 表情包概率：私聊 0.22、群 0.08（原来 0.18 / 0.06）。
+- 新增指令：`/规矩 [内容]`、`/画像`、`/用量 [天数]`、`/余额`。
+- 自测 **122 项全通过**（新增内部标记、规矩、画像、账本、连发合并、语音闸门六组）。
+
 ## v1.10.0 — 群聊按活跃度说话（2026-10-28）
 
 用户要求：群里最多允许 100 条/天，视群聊活跃度决定频率；热闹时能跟着群友接话，冷清时偶尔进来冒一句；

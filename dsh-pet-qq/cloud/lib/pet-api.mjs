@@ -23,6 +23,9 @@ import { loadSummary, manageHistory, selfBrief } from './memory-manager.mjs';
 import { extractChatImage, imageInstruction, limitPool, readMemePool, resolveMemeFile } from './memes.mjs';
 import { chatCompletion } from './llm.mjs';
 import { describeImage } from './vision.mjs';
+import { loadAgency, moodBrief, rulesBrief } from './agency.mjs';
+import { profileBrief } from './profiles.mjs';
+import { recordUsage } from './usage.mjs';
 import {
   PATHS,
   appendMessages,
@@ -312,6 +315,29 @@ function stripMemeTag(text) {
     .trim();
 }
 
+/**
+ * 内部标记清洗：模型偶尔会把「本不该被看见」的结构吐出来——
+ * `<system_reminder>…</system_reminder>`、DSML 标签、`[图:…]` 残留、以及我们自己拼进 prompt 的
+ * 【回复方式】【规矩】【你想起来的】这些段落。一旦漏到消息里，人设瞬间穿帮。
+ *
+ * 三处兜底：出站发送前、写记忆前、拆气泡前（同一份函数，避免三处各写一遍正则）。
+ */
+const INTERNAL_MARKS = [
+  /<system[_-]?reminder>[\s\S]*?<\/system[_-]?reminder>/gi,
+  /<\/?(?:DSML|dsml|tool_call|tool_result|function_calls?)\b[^>]*>/g,
+  /\[\s*图\s*[:：][^\]\n]{0,40}\]/gu,
+  /^[ \t]*【(?:回复方式|规矩|你想起来的|你最近看到的|现在的心情|说话的人|这个会话里刚发过的图)】.*$/gmu,
+];
+
+export function stripInternal(text = '') {
+  let s = String(text ?? '');
+  for (const re of INTERNAL_MARKS) s = s.replace(re, '');
+  return s
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 /** 与人格无关的「打字习惯」硬约束：模型经常忘了字数上限，这句每轮都提醒它 */
 const REPLY_STYLE =
   '\n\n【回复方式】像在 QQ 上跟人聊天：' +
@@ -556,7 +582,10 @@ function pickCut(s) {
  *   surface 决定用哪一档人格：群里可以是「你鱼姐」，私聊仍是「小蓝」；
  *   conv（如 `group:123456`）决定记忆桶，群聊必须传。
  */
-export async function chat(text, { petId = 'main', surface = 'private', conv = '', timeoutMs = 90_000 } = {}) {
+export async function chat(
+  text,
+  { petId = 'main', surface = 'private', conv = '', speaker = null, timeoutMs = 90_000 } = {},
+) {
   const input = String(text ?? '').trim();
   if (!input) return { ok: false, reason: 'bad-request', message: '消息为空' };
 
@@ -586,10 +615,22 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
     background = seen + recalled + self;
     if (hits.length) await touch(hits.map((h) => h.id));
   }
+  // 心情是慢变量（每小时回归基线），只给方向提示；规矩是硬约束，放在人格之前。
+  const agency = await loadAgency(new Date());
+  const rules = rulesBrief(agency.rules);
+  const mood = moodBrief(agency.mood);
+  // 群里按「这个人平时怎么说话」补两三行画像；私聊不画像（就是主人本人）
+  const speakerBrief =
+    kind === 'group' && speaker?.id
+      ? await profileBrief({ conv, userId: speaker.id, name: speaker.name })
+      : '';
   const system =
+    rules +
     composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
     REPLY_STYLE +
-    background;
+    mood +
+    background +
+    speakerBrief;
 
   const rounds = Math.max(1, Math.floor(Number(conf.chatMemoryRounds) || 5));
   // 多取一些再交给记忆管理：早期轮次会被压成摘要（L2），摘要落盘、重启不丢
@@ -608,15 +649,24 @@ export async function chat(text, { petId = 'main', surface = 'private', conv = '
     { role: 'user', content: input + imageInstruction(pool) },
   ];
 
+  const callStarted = Date.now();
   const res = await chatCompletion(messages, { timeoutMs, maxTokens: 256 });
   if (!res.ok) {
     if (res.reason === 'provider-missing') return { ok: false, reason: 'provider-missing', message: res.message };
     return { ok: false, reason: 'generate-error', message: res.message };
   }
+  recordUsage({
+    kind: 'chat',
+    usage: res.usage,
+    model: res.model,
+    conv: bucket,
+    ms: Date.now() - callStarted,
+  }).catch(() => {});
 
   const parsed = extractChatImage(res.text, pool);
   const image = parsed.image;
-  const finalText = (image ? parsed.text : stripMemeTag(parsed.text)).trim() || res.text.trim();
+  const finalText =
+    stripInternal(image ? parsed.text : stripMemeTag(parsed.text)).trim() || stripInternal(res.text).trim();
 
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
   const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(conf.maxBubbles) || 6)));

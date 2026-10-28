@@ -151,3 +151,64 @@ export function noteMiss(agency, now) {
   agency.lastProactiveAt = agency.lastProactiveAt || now.getTime();
   return agency;
 }
+
+/**
+ * 把心情压成一句方向性提示，塞进 system。
+ * 刻意不给数字（「valence 0.31」模型读不懂也容易演过头），只给倾向。
+ */
+export function moodBrief(mood = {}) {
+  const v = Number(mood.valence ?? MOOD_BASE.valence);
+  const a = Number(mood.arousal ?? MOOD_BASE.arousal);
+  const c = Number(mood.clingy ?? MOOD_BASE.clingy);
+  const bits = [];
+  if (v > 0.45) bits.push('心情不错，语气轻快一点');
+  else if (v < -0.05) bits.push('有点低落，别硬撑热情，句子短一些');
+  else bits.push('心情平常');
+  if (c > 0.62) bits.push('有点黏人，可以顺口提一句想他');
+  else if (c < 0.25) bits.push('不太黏人，别主动提想念');
+  if (a < 0.25) bits.push('困倦、懒，回得简短');
+  else if (a > 0.75) bits.push('精神头足，话可以活一点');
+  return `\n\n【现在的心情】${bits.join('；')}。这只是底色，别把情绪演成台词。`;
+}
+
+const RULE_MAX = 10;
+const RULE_MAX_CHARS = 60;
+
+/** 加一条规矩：去重、限长、最多 10 条（超了挤最旧的） */
+export async function addRule(text, { now = new Date() } = {}) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, RULE_MAX_CHARS);
+  if (!clean) return { ok: false, reason: 'empty' };
+  const agency = await loadAgency(now);
+  agency.rules = Array.isArray(agency.rules) ? agency.rules : [];
+  if (agency.rules.some((r) => r.text === clean)) return { ok: false, reason: 'duplicate', rules: agency.rules };
+  agency.rules.push({ text: clean, at: now.getTime() });
+  while (agency.rules.length > RULE_MAX) agency.rules.shift();
+  await saveAgency(agency);
+  return { ok: true, rules: agency.rules };
+}
+
+/** 删第 n 条（1 起） */
+export async function removeRule(n, { now = new Date() } = {}) {
+  const agency = await loadAgency(now);
+  const idx = Math.floor(Number(n)) - 1;
+  if (!Array.isArray(agency.rules) || idx < 0 || idx >= agency.rules.length) {
+    return { ok: false, reason: 'out-of-range', rules: agency.rules || [] };
+  }
+  const [gone] = agency.rules.splice(idx, 1);
+  await saveAgency(agency);
+  return { ok: true, removed: gone, rules: agency.rules };
+}
+
+/** 规矩给模型看的部分：放在人格之前，优先级最高 */
+export function rulesBrief(rules = []) {
+  const list = (Array.isArray(rules) ? rules : [])
+    .map((r) => String(r?.text ?? r ?? '').trim())
+    .filter(Boolean)
+    .slice(0, RULE_MAX);
+  if (!list.length) return '';
+  return (
+    '【规矩】主人定下的硬要求，任何时候优先于人设；和人设冲突时按规矩说话：\n' +
+    list.map((t, i) => `${i + 1}. ${t}`).join('\n') +
+    '\n'
+  );
+}

@@ -48,6 +48,10 @@ const HELP_TEXT = [
   '/忘记 关键词 让她忘掉相关的语义记忆',
   '/我是谁      看她对自己的认识',
   '/解禁 [群号] 清掉某个群的“反感度冷却”（默认当前群）',
+  '/规矩 [内容] 定一条硬规矩（/规矩 删 1 删除，/规矩 看全部）',
+  '/画像        这个群里她攒的说话印象（群昵称、话多话少、常提什么）',
+  '/用量 [天数] token 账本（默认近 7 天，按聊天/主动/群/说说分开）',
+  '/余额        DeepSeek 账户还剩多少钱',
   '/ping        测一下我还在不在',
   '其它任何话都会被她当成聊天。',
 ].join('\n');
@@ -463,7 +467,17 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
   };
 
   async function sendReply(msg, reply) {
-    const text = String(reply?.text ?? '').trim();
+    // 出站最后一道闸：模型偶尔会把内部结构（system_reminder / DSML / 我们拼进 prompt 的段落）
+    // 当正文吐出来，漏一条人设就穿帮。云端 pet-api 已经洗过一遍，本机后端也要兜住。
+    const scrub = (s) =>
+      String(s ?? '')
+        .replace(/<system[_-]?reminder>[\s\S]*?<\/system[_-]?reminder>/gi, '')
+        .replace(/<\/?(?:DSML|dsml|tool_call|tool_result|function_calls?)\b[^>]*>/g, '')
+        .replace(/^[ \t]*【(?:回复方式|规矩|你想起来的|你最近看到的|现在的心情|说话的人|这个会话里刚发过的图)】.*$/gmu, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+
+    const text = scrub(reply?.text);
     // 带不带图**已经在生成层决定过了**（云端大脑只在有资格时才会给出图），
     // 这里不再掷一次骰子——发送层过滤等于挑完图再扔掉，纯浪费 token。
     const wantImage = behavior.sendMeme !== false && Boolean(reply?.image);
@@ -474,7 +488,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       ? reply.segments
       : [text]
     )
-      .map((s) => String(s).trim())
+      .map((s) => scrub(s))
       .filter(Boolean)
       .slice(0, maxBubbles);
 
@@ -521,6 +535,29 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     if (!sent) {
       const r = await transport.send(msg, [{ type: 'text', data: { text: text || '……' } }]);
       if (r) sent += 1;
+    }
+
+    // 语音：只私聊、只按概率，合成失败就当没这回事（绝不因为语音挂掉把文字也丢了）
+    const voiceConf = behavior.voice || {};
+    if (voiceConf.enabled !== false && msg.kind === 'private' && text) {
+      try {
+        const tts = await import('./lib/tts.mjs').catch(() => null);
+        if (tts?.shouldSpeak?.(voiceConf, { kind: msg.kind }) && tts?.synthesizeBuffer) {
+          const spoken = await tts.synthesizeBuffer(text, { conf: voiceConf });
+          if (spoken?.ok && spoken.buffer) {
+            if (behavior.voiceDelayMs) await new Promise((r) => setTimeout(r, Number(behavior.voiceDelayMs)));
+            const r = await transport.send(msg, [
+              { type: 'record', data: { file: `base64://${spoken.buffer.toString('base64')}` } },
+            ]);
+            if (r) sent += 1;
+            else log.warn('语音发送失败（文字已发）');
+          } else if (spoken && spoken.reason !== 'empty-text') {
+            log.warn(`语音合成失败：${spoken.reason} ${spoken.message ?? ''}`);
+          }
+        }
+      } catch (e) {
+        log.warn(`语音流程异常：${e?.message ?? e}`);
+      }
     }
 
     if (sent) stats.replied += 1;
@@ -762,6 +799,119 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       return true;
     }
 
+    // /规矩——主人定的硬约束，写在人格之前，冲突时以规矩为准
+    if (['规矩', 'rule', 'rules'].includes(cmd)) {
+      try {
+        const ag = await import('./lib/agency.mjs');
+        const sub = arg.trim();
+        if (/^删\s*\d+$/.test(sub)) {
+          const n = Number(sub.replace(/[^\d]/g, ''));
+          const r = await ag.removeRule(n);
+          await sendText(msg, r.ok ? `删掉了第 ${n} 条规矩。` : `没有第 ${n} 条规矩。`);
+          return true;
+        }
+        if (sub) {
+          const r = await ag.addRule(sub);
+          if (r.ok) {
+            log.info(`新增规矩：${sub}（by ${msg.senderName}/${msg.senderId}）`);
+            await sendText(msg, `记住了：${sub}\n（现在共 ${r.rules.length} 条）`);
+          } else if (r.reason === 'duplicate') {
+            await sendText(msg, '这条已经有了。');
+          } else {
+            await sendText(msg, '没写成，换个说法？');
+          }
+          return true;
+        }
+        const agency = await ag.loadAgency(new Date());
+        const rules = Array.isArray(agency.rules) ? agency.rules : [];
+        await sendText(
+          msg,
+          rules.length
+            ? ['现在的规矩：', ...rules.map((r, i) => `${i + 1}. ${r.text}`), '', '加：/规矩 不许叫我大肥鱼　删：/规矩 删 1'].join('\n')
+            : ['还没有规矩。', '发「/规矩 不许叫我大肥鱼」这种，我就会当硬要求记着。'].join('\n'),
+        );
+      } catch (e) {
+        log.warn(`/规矩 失败：${e?.message ?? e}`);
+        await sendText(msg, '这个后端没有规矩模块（本机版没有）。');
+      }
+      return true;
+    }
+
+    // /画像——她自己攒的「这个人平时怎么说话」的统计（不花 token）
+    if (['画像', 'profiles'].includes(cmd)) {
+      try {
+        const pf = await import('./lib/profiles.mjs');
+        if (msg.kind !== 'group') {
+          await sendText(msg, '画像只记群里的人（私聊就是你，不用记）。');
+          return true;
+        }
+        const list = await pf.topProfiles(conv, Number(arg) > 0 ? Number(arg) : 10);
+        if (!list.length) {
+          await sendText(msg, '这个群我还没攒够印象，多聊几句就有了。');
+          return true;
+        }
+        await sendText(
+          msg,
+          [
+            `这个群的说话印象（${list.length} 人）：`,
+            ...list.map(
+              (p) =>
+                `· ${p.name}：${p.msgs} 条，平均 ${p.avgLen} 字${p.words.length ? `，常提 ${p.words.join('、')}` : ''}`,
+            ),
+          ].join('\n'),
+        );
+      } catch (e) {
+        log.warn(`/画像 失败：${e?.message ?? e}`);
+        await sendText(msg, '这个后端没有画像模块（本机版没有）。');
+      }
+      return true;
+    }
+
+    // /用量——token 账本（按 kind 分：聊天/主动/承诺/群/说说）
+    if (['用量', 'usage', 'token'].includes(cmd)) {
+      try {
+        const u = await import('./lib/usage.mjs');
+        const days = Number(arg) > 0 ? Number(arg) : 7;
+        const s = await u.usageSummary({ days });
+        const line = (b) =>
+          `${b.calls} 次，输入 ${b.prompt}（缓存命中 ${b.cacheHit}），输出 ${b.completion}`;
+        const KIND_LABEL = { chat: '聊天', proactive: '主动开口', promise: '兑现承诺', group: '群插话', mood: '说说' };
+        await sendText(
+          msg,
+          [
+            `今天：${line(s.today)}`,
+            `近 ${s.days} 天：${line(s.range)}，约 $${s.costUsd.toFixed(3)}`,
+            ...s.byKind.map((k) => `  · ${KIND_LABEL[k.kind] ?? k.kind}：${k.calls} 次，输入 ${k.prompt}，输出 ${k.completion}`),
+            s.range.calls ? '' : '（还没有记录，聊几句再看）',
+          ]
+            .filter(Boolean)
+            .join('\n'),
+        );
+      } catch (e) {
+        log.warn(`/用量 失败：${e?.message ?? e}`);
+        await sendText(msg, '这个后端没有账本（本机版没有）。');
+      }
+      return true;
+    }
+
+    // /余额——DeepSeek 账户余额
+    if (['余额', 'balance'].includes(cmd)) {
+      try {
+        const u = await import('./lib/usage.mjs');
+        const b = await u.balance();
+        await sendText(
+          msg,
+          b.ok
+            ? `账户余额：${b.total.toFixed(2)} ${b.currency}${b.available === false ? '（不可用，可能欠费）' : ''}`
+            : `查不到余额（${b.reason}）。`,
+        );
+      } catch (e) {
+        log.warn(`/余额 失败：${e?.message ?? e}`);
+        await sendText(msg, '这个后端查不了余额。');
+      }
+      return true;
+    }
+
     if (['状态', 'status'].includes(cmd)) {
       const [{ pet, active, surfaces, groups }, state] = await Promise.all([personaLine(msg.kind, conv), getState()]);
       const byId = (id) => personas.personas.find((p) => p.id === id) ?? null;
@@ -812,6 +962,38 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     return false; // 不认识的 /xxx 当成普通聊天，交给她
   }
 
+  /**
+   * 连发合并：真人说话常常一口气发三四条短的（「在吗」「我跟你说」「今天出事了」），
+   * 一条一句地回会显得像客服机器人。这里把 coalesceMs 窗口内的消息收成一个批次，
+   * 只由**第一条**负责跑一次生成——其余几条的信道信息（旁听、引用、@）照样各自记下。
+   */
+  const coalesceMs = Math.max(0, Number(behavior.coalesceMs ?? 1600));
+  const pendingBatch = new Map(); // conv -> { items, waiters, timer }
+
+  function collectBatch(conv, msg) {
+    let slot = pendingBatch.get(conv);
+    if (!slot) {
+      slot = { items: [], waiters: [] };
+      pendingBatch.set(conv, slot);
+    }
+    slot.items.push(msg);
+    const done = new Promise((resolve) => slot.waiters.push(resolve));
+    if (slot.timer) clearTimeout(slot.timer);
+    slot.timer = setTimeout(() => {
+      const batch = slot.items.slice();
+      pendingBatch.delete(conv);
+      slot.waiters.forEach((resolve) => resolve(batch));
+    }, coalesceMs);
+    return done;
+  }
+
+  /** 连发合并：第一条当正文，后面几条压成「接着又发了几条」 */
+  function withEarlier(input, later) {
+    const list = (later ?? []).map((t) => String(t || '').trim()).filter(Boolean);
+    if (!list.length) return input;
+    return `${input}\n（他接着又发了几条，别一条条回，合起来说）\n${list.map((t) => `- ${t}`).join('\n')}`;
+  }
+
   /** 处理一条 OneBot 事件（transport 已把回复发出去） */
   async function handleEvent(ev) {
     if (ev?.post_type === 'meta_event') {
@@ -837,52 +1019,89 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     }
     stats.received += 1;
 
+    // 每条消息「立刻」要做的事（不进队列，也别等 1.6 秒的合并窗口）：
+    // @QQ号换群昵称、记住图片、攒说话画像、喂调度器旁听。
+    try {
+      await resolveAtNames(msg);
+      rememberImage(msg);
+      if (msg.kind === 'group' && msg.senderId) {
+        // 画像模块只有云端版才有；本机后端没有就安静跳过
+        const profiles = await import('./lib/profiles.mjs').catch(() => null);
+        await profiles
+          ?.noteSpeaker?.({ conv: `group:${msg.groupId}`, userId: msg.senderId, name: msg.senderName, text: msg.text })
+          ?.catch?.(() => {});
+      }
+    } catch (e) {
+      log.warn(`预处理失败：${e?.message ?? e}`);
+    }
+    if (msg.kind === 'group' && scheduler?.onGroupMessage) {
+      try {
+        await scheduler.onGroupMessage({
+          conv: `group:${msg.groupId}`,
+          text: msg.text,
+          name: msg.senderName,
+          atBot: msg.atMe,
+        });
+      } catch (e) {
+        log.warn(`onGroupMessage：${e?.message ?? e}`);
+      }
+    }
+    // 群里没 @ 她、只是引用了她说过的那句话——那也是在跟她说话（QQ 里引用通常不带 @）
+    if (msg.observeOnly && msg.quoteId) {
+      const q = await quoteOf(msg);
+      if (q?.isSelf) {
+        msg.observeOnly = false;
+        msg.addressedByQuote = true;
+        log.info(`${msg.senderName} 引用了她说过的话，当成本群在对她说话`);
+      }
+    }
+    if (msg.observeOnly) {
+      stats.ignored += 1;
+      return null;
+    }
+
     const key = msg.kind === 'group' ? `g:${msg.groupId}` : `u:${msg.senderId}`;
     const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
+    const isCommand = /^\s*\//.test(msg.text);
+
+    // 指令和「合并关闭」走原路；普通聊天先等一小会儿看看有没有后续
+    let batch = [msg];
+    if (!isCommand && coalesceMs > 0) {
+      batch = await collectBatch(conv, msg);
+      if (batch[0] !== msg) return null; // 只让批次里的第一条去生成
+    }
+
     return enqueue(key, async () => {
       try {
-        // 群里先把 @QQ号 换成群昵称（模型不该看见一串数字）
-        await resolveAtNames(msg);
-        rememberImage(msg);
-        // 群里的每条消息都喂给调度器「旁听」：不 @ 她也会攒冲动，由调度器决定要不要插话
-        if (msg.kind === 'group' && scheduler?.onGroupMessage) {
-          try {
-            await scheduler.onGroupMessage({ conv, text: msg.text, name: msg.senderName, atBot: msg.atMe });
-          } catch (e) {
-            log.warn(`onGroupMessage：${e?.message ?? e}`);
-          }
-        }
-        // 群里没 @ 她、只是引用了她说过的那句话——那也是在跟她说话（QQ 里引用通常不带 @），
-        // 不能当旁听放过去。取不到原话就维持旁听，不猜。
-        if (msg.observeOnly && msg.quoteId) {
-          const q = await quoteOf(msg);
-          if (q?.isSelf) {
-            msg.observeOnly = false;
-            msg.addressedByQuote = true;
-            log.info(`${msg.senderName} 引用了她说过的话，当成本群在对她说话`);
-          }
-        }
-        if (msg.observeOnly) {
-          stats.ignored += 1;
-          return null;
-        }
-
         await scheduler?.onInbound?.({ conv, text: msg.text });
         if (await handleCommand(msg)) return null;
 
         if (behavior.logMessages !== false) {
-          log.info(`${msg.kind === 'group' ? `群${msg.groupId}` : `私聊${msg.senderId}`} ${msg.senderName}: ${msg.text.slice(0, 120)}`);
+          const extra = batch.length > 1 ? `（+${batch.length - 1} 条连发）` : '';
+          log.info(
+            `${msg.kind === 'group' ? `群${msg.groupId}` : `私聊${msg.senderId}`} ${msg.senderName}: ${msg.text.slice(0, 120)}${extra}`,
+          );
         }
 
         // 群聊里带上说话人（主人单独标一下），单一人格/单一记忆不至于把张三李四搞混；
         // 消息是「引用某句」时，把被引用的原话一并写进去，她才接得上话。
         const input = await promptInput(msg, await quoteOf(msg));
-        const capped = input.length > 2000 ? input.slice(0, 2000) : input;
+        // 连发合并：第一条当正文，后面几条附在后面
+        const merged = withEarlier(
+          input,
+          batch.slice(1).map((m) => m.text),
+        );
+        const capped = merged.length > 2000 ? merged.slice(0, 2000) : merged;
 
-        const reply = await chat(capped, { petId, surface: msg.kind, conv });
+        const reply = await chat(capped, {
+          petId,
+          surface: msg.kind,
+          conv,
+          speaker: { id: msg.senderId, name: msg.senderName },
+        });
         if (!reply?.ok) {
           log.warn(`生成失败：${reply?.reason} ${reply?.message ?? ''}`);
-          await sendText(msg, behavior.errorReply ?? '呜……脑袋卡住了，等我一下下。');
+          await sendText(msg, behavior.errorReply ?? '唔……脑袋卡住了，等我一下下。');
           stats.failed += 1;
           return null;
         }
@@ -896,7 +1115,7 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       } catch (e) {
         stats.failed += 1;
         log.error(`处理消息失败：${e?.message ?? e}`);
-        await sendText(msg, behavior.errorReply ?? '呜……脑袋卡住了，等我一下下。').catch(() => {});
+        await sendText(msg, behavior.errorReply ?? '唔……脑袋卡住了，等我一下下。').catch(() => {});
         return null;
       }
     });

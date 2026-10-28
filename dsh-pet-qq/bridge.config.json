@@ -18,8 +18,17 @@
     "maxBubbles": 6,
     "bubbleDelayMs": 700,
     "tailPauseMs": 800,
+    "coalesceMs": 1600,
     "observeGroups": true,
-    "quoteReply": "auto"
+    "quoteReply": "auto",
+    "voice": {
+      "enabled": true,
+      "chance": 0.15,
+      "privateOnly": true,
+      "voice": "zh-CN-XiaoyiNeural",
+      "maxChars": 60
+    },
+    "voiceDelayMs": 400
   },
   "proactive": {
     "enabled": true,

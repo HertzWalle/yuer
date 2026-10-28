@@ -27,7 +27,9 @@ export function endpointOf(base) {
  * 生成一句回复。
  * @param {{role: 'system'|'user'|'assistant', content: string}[]} messages
  * @param {{model?: string, temperature?: number, maxTokens?: number, timeoutMs?: number}} [opts]
- * @returns {Promise<{ok: true, text: string} | {ok: false, reason: string, message?: string}>}
+ * @returns {Promise<{ok: true, text: string, usage?: object, model?: string} | {ok: false, reason: string, message?: string}>}
+ *
+ * 成功时把服务端返回的 usage（prompt/completion/cache 命中）一起带回去，账本要用。
  */
 export async function chatCompletion(messages, opts = {}) {
   const conf = llmConfig();
@@ -38,7 +40,8 @@ export async function chatCompletion(messages, opts = {}) {
   const body = {
     model,
     messages,
-    temperature: opts.temperature ?? 1,
+    // 0.85 是实测下来「有起伏但不乱编」的档位（1.2 开始瞎编，0.6 变木头）
+    temperature: opts.temperature ?? Number(process.env.DEEPSEEK_TEMPERATURE || 0.85),
     max_tokens: opts.maxTokens ?? 256,
     stream: false,
   };
@@ -68,7 +71,7 @@ export async function chatCompletion(messages, opts = {}) {
           break;
         }
         const text = String(parsed?.choices?.[0]?.message?.content ?? '').trim();
-        if (text) return { ok: true, text };
+        if (text) return { ok: true, text, usage: parsed?.usage ?? null, model: parsed?.model || model };
         lastMessage = '模型没返回正文（finish_reason=' + (parsed?.choices?.[0]?.finish_reason ?? '?') + '）';
       }
     } catch (e) {

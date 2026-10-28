@@ -48,8 +48,15 @@ const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href
 const load = (p) => import(pathToFileURL(join(DIST, 'lib', p)).href);
 
 const conf = JSON.parse(await readFile(join(DIST, 'bridge.config.json'), 'utf8'));
-// 气泡间隔/尾巴停顿调 0，别让测试干等
-conf.behavior = { ...(conf.behavior || {}), bubbleDelayMs: 0, typingDelayMs: 0, tailPauseMs: 0 };
+// 气泡间隔/尾巴停顿/连发合并都调 0，别让测试干等（语音在自测里关掉：edge-tts 不一定装了）
+conf.behavior = {
+  ...(conf.behavior || {}),
+  bubbleDelayMs: 0,
+  typingDelayMs: 0,
+  tailPauseMs: 0,
+  coalesceMs: 0,
+  voice: { ...(conf.behavior?.voice || {}), enabled: false },
+};
 // 自测里的「主人」是 20001：指令只有主人能发、按群切人格都要用到它
 conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001', '1360153202'] };
 
@@ -432,6 +439,12 @@ async function main() {
   await testFeeds();
   await testSemanticMemory();
   await testMemoryManager();
+  await testInternalMarks();
+  await testRules();
+  await testProfiles();
+  await testUsage();
+  await testCoalesce();
+  await testVoiceGate();
 
   await testAgency();
 
@@ -759,6 +772,173 @@ async function testQzoneHelpers() {
 
   const brief = await notesBrief('qzone', 5);
   check('语义记忆能拼成背景提示', brief.includes('【你最近看到的】') && brief.includes('空调'), brief.slice(0, 40));
+}
+
+/* ------------------------ P0：防串台 / 规矩 / 画像 / 账本 ------------------------ */
+
+async function testInternalMarks() {
+  const { stripInternal } = petApi;
+  check(
+    '内部标记：system_reminder 被清掉',
+    stripInternal('<system_reminder>注意别出戏</system_reminder>你好呀') === '你好呀',
+    JSON.stringify(stripInternal('<system_reminder>x</system_reminder>你好呀')),
+  );
+  check(
+    '内部标记：DSML 标签被清掉',
+    !stripInternal('<DSML>tool</DSML>在呢').includes('DSML'),
+    JSON.stringify(stripInternal('<DSML>tool</DSML>在呢')),
+  );
+  const leaked = stripInternal('【规矩】不许叫大肥鱼\n好，记住了');
+  check(
+    '内部标记：我们拼进 prompt 的段落不会漏出去',
+    !leaked.includes('【规矩】') && leaked.includes('好，记住了'),
+    JSON.stringify(leaked),
+  );
+  check('内部标记：[图:…] 残留被清掉', stripInternal('笑死[图:疑惑]').trim() === '笑死', JSON.stringify(stripInternal('笑死[图:疑惑]')));
+
+  // 桥上再兜一层：模型真把标记吐出来时，发出去的消息里不能有
+  mock.setReplyResolver(() => '<system_reminder>别出戏</system_reminder>嗯嗯，我听着呢');
+  const n = sent.length;
+  await bridge.handleEvent(ev({ message: [{ type: 'text', data: { text: '在吗' } }] }));
+  const txt = segText(last()?.segments ?? '');
+  check('出站兜底：发出去的消息里没有内部标记', sent.length > n && !txt.includes('system_reminder'), txt.slice(0, 40));
+  mock.setReplyResolver(null);
+}
+
+async function testRules() {
+  const ag = await load('agency.mjs');
+  await ag.addRule('不许叫主人「大肥鱼」');
+  const dup = await ag.addRule('不许叫主人「大肥鱼」');
+  check('规矩：重复的不重复记', dup.ok === false && dup.reason === 'duplicate');
+  const brief = ag.rulesBrief((await ag.loadAgency(new Date())).rules);
+  check(
+    '规矩：拼进 system 时带编号、放在最前',
+    brief.startsWith('【规矩】') && /1\. 不许叫主人/.test(brief),
+    brief.split('\n')[0],
+  );
+  for (let i = 0; i < 12; i += 1) await ag.addRule(`第 ${i} 条测试规矩`);
+  const many = await ag.loadAgency(new Date());
+  check('规矩：最多留 10 条', many.rules.length === 10, `${many.rules.length} 条`);
+  const rm = await ag.removeRule(1);
+  check('规矩：能删掉第一条', rm.ok && !ag.rulesBrief(rm.rules).includes('第 1 条测试规矩'));
+  // 清干净，别影响后面的用例
+  let left = (await ag.loadAgency(new Date())).rules;
+  while (left.length) {
+    await ag.removeRule(1);
+    left = (await ag.loadAgency(new Date())).rules;
+  }
+}
+
+async function testProfiles() {
+  const pf = await load('profiles.mjs');
+  const conv = 'group:777001';
+  for (const t of ['草，这显卡又涨价了', '我刚下班，累死', '显卡别买，等降价']) {
+    await pf.noteSpeaker({ conv, userId: '3114694568', name: '搬砖king', text: t, at: Date.now() });
+  }
+  const brief = await pf.profileBrief({ conv, userId: '3114694568', name: '搬砖king' });
+  check(
+    '画像：攒够三条就能拼出提示',
+    brief.includes('【说话的人】') && brief.includes('搬砖king'),
+    brief.replace(/\n/g, ' ').slice(0, 60),
+  );
+  check('画像：爱提的词会带上', brief.includes('显卡') || brief.includes('涨价'), brief.slice(0, 80));
+  const list = await pf.topProfiles(conv, 5);
+  check('画像：/画像 能列出这个人', list.length === 1 && list[0].msgs === 3, JSON.stringify(list[0]?.msgs));
+  check('画像：只有一条时不硬凑描述', (await pf.profileBrief({ conv, userId: '999', name: 'x' })) === '');
+}
+
+async function testUsage() {
+  const u = await load('usage.mjs');
+  await u.recordUsage({
+    kind: 'chat',
+    model: 'mock',
+    usage: { prompt_tokens: 120, completion_tokens: 30, prompt_cache_hit_tokens: 80 },
+    ms: 12,
+  });
+  await u.recordUsage({
+    kind: 'group',
+    model: 'mock',
+    usage: { prompt_tokens: 60, completion_tokens: 10, prompt_cache_hit_tokens: 0 },
+    ms: 9,
+  });
+  const s = await u.usageSummary({ days: 1 });
+  check('账本：今天的调用被记下', s.today.calls >= 2, `${s.today.calls} 次`);
+  check('账本：缓存命中的 token 单独统计', s.today.cacheHit >= 80, `命中 ${s.today.cacheHit}`);
+  const kinds = s.byKind.map((x) => x.kind);
+  check('账本：按 kind 分开（聊天/群）', kinds.includes('chat') && kinds.includes('group'), kinds.join(','));
+  const wrapped = await u.withUsage('proactive', async () => ({
+    ok: true,
+    text: 'x',
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
+  }));
+  const s2 = await u.usageSummary({ days: 1 });
+  check(
+    '账本：withUsage 包一层就自动记账',
+    wrapped.ok && s2.byKind.some((k) => k.kind === 'proactive' && k.calls === 1),
+    s2.byKind.map((k) => k.kind).join(','),
+  );
+}
+
+async function testCoalesce() {
+  const localSent = [];
+  const localTransport = {
+    async send(msg, segments) {
+      localSent.push({ to: `${msg.kind}:${msg.groupId ?? msg.senderId}`, segments });
+      return { message_id: localSent.length + 10_000 };
+    },
+    async call() {
+      throw new Error('不支持');
+    },
+  };
+  const c2 = {
+    ...conf,
+    behavior: { ...conf.behavior, coalesceMs: 120 },
+  };
+  const bridge2 = createBridge({ conf: c2, personas, transport: localTransport, log: quiet });
+  bridge2.__debugLog = process.env.COALESCE_DEBUG ? console.log : null;
+  const msgEv = (id, text, uid) =>
+    ev({ message_id: id, user_id: uid, sender: { user_id: uid, nickname: '主人' }, message: [{ type: 'text', data: { text } }] });
+  const callsBefore = mock.calls.length;
+  // 固定回复，避免 mock 回显 prompt（否则拆气泡会把上下文片段当回复发出去）
+  mock.setReplyResolver(() => '在的在的。');
+  const p1 = bridge2.handleEvent(msgEv('coal-1', '在吗小蓝', 20001));
+  const p2 = bridge2.handleEvent(msgEv('coal-2', '我跟你说个事啊', 20001));
+  const p3 = bridge2.handleEvent(msgEv('coal-3', '今天服务器又炸了呀', 20001));
+  await Promise.all([p1, p2, p3]);
+  mock.setReplyResolver(null);
+  const calls = mock.calls.length - callsBefore;
+  const texts = localSent.filter((x) => x.segments.some((s) => s.type === 'text'));
+  check('连发合并：三条连发只回一次', calls === 1 && texts.length === 1, `模型调用 ${calls} 次、发了 ${texts.length} 条`);
+  const seen = mock.calls
+    .slice(callsBefore)
+    .map((c) => c.messages.map((m) => String(m.content)).join('\n'))
+    .join('\n');
+  const hasEarlier = seen.includes('（他接着又发了几条');
+  const all = ['在吗小蓝', '我跟你说个事啊', '今天服务器又炸了呀'];
+  const missing = all.filter((t) => !seen.includes(t));
+  check(
+    '连发合并：三条的内容都在同一次上下文里',
+    hasEarlier && missing.length === 0,
+    `合并标记=${hasEarlier}，缺=${missing.join('/') || '无'}`,
+  );
+}
+
+async function testVoiceGate() {
+  const tts = await load('tts.mjs');
+  check('语音：私聊按概率放行', tts.shouldSpeak({ enabled: true, chance: 1, privateOnly: true }, { kind: 'private' }) === true);
+  check(
+    '语音：群里默认不说话',
+    tts.shouldSpeak({ enabled: true, chance: 1, privateOnly: true }, { kind: 'group' }) === false,
+  );
+  check('语音：概率 0 就不发', tts.shouldSpeak({ enabled: true, chance: 0 }, { kind: 'private' }) === false);
+  check('语音：总开关关掉', tts.shouldSpeak({ enabled: false, chance: 1 }, { kind: 'private' }) === false);
+  const cleaned = tts.speechText('好呀（歪头）[图:疑惑] 你说的这个 https://x.com 我记住了');
+  check(
+    '语音：念之前先洗掉动作/图/链接',
+    !cleaned.includes('歪头') && !cleaned.includes('[图') && !cleaned.includes('http'),
+    cleaned,
+  );
+  check('语音：空文本直接跳过', (await tts.synthesize('（歪头）')).ok === false);
 }
 
 /* ----------------------------- 主动性（P1a）自测 ---------------------------- */

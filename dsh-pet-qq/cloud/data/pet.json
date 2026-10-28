@@ -67,8 +67,8 @@
   },
   "maxBubbles": 6,
   "splitChance": 0.5,
-  "memeChancePrivate": 0.18,
-  "memeChanceGroup": 0.06,
+  "memeChancePrivate": 0.22,
+  "memeChanceGroup": 0.08,
   "memeCooldown": 5,
   "qzone": {
     "enabled": true,

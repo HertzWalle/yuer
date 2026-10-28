@@ -29,6 +29,10 @@ export const PATHS = (() => {
     chatter: join(dataDir, 'chatter.json'),
     /** 语义记忆：从外部看到的事（QQ 空间动态等）压成短句，作为聊天背景 */
     semantic: join(dataDir, 'semantic.json'),
+    /** 群友/私聊对象的说话画像（叫法、长短、口癖），只统计不花 token */
+    profiles: join(dataDir, 'profiles.json'),
+    /** token 账本：按月一个 jsonl */
+    usageDir: join(dataDir, 'usage'),
     memesDir: join(dataDir, 'memes'),
     backupsDir: join(dataDir, 'backups'),
   };

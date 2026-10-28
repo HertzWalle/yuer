@@ -11,6 +11,7 @@
 import { composeSystemPrompt } from './prompt.mjs';
 import { extractChatImage, imageInstruction } from './memes.mjs';
 import { chatCompletion } from './llm.mjs';
+import { withUsage } from './usage.mjs';
 
 /** 把心情翻译成一句人话（给提示词用，不给用户看） */
 export function moodWord(mood = {}) {
@@ -90,7 +91,7 @@ export async function generateProactive({ pet, now = new Date(), history = [], m
     content: `（现在是你自己想说话的时候。${hint ? '参考上面的线索。' : ''}按 JSON 输出。）` + imageInstruction(pool),
   });
 
-  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 220 });
+  const res = await withUsage('proactive', () => chatCompletion(msgs, { temperature: 1, maxTokens: 220 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const { think, say } = parseThinkSay(res.text);
@@ -126,7 +127,7 @@ export async function generateCommitmentMessage({ pet, now = new Date(), history
   }
   msgs.push({ role: 'user', content: '（现在去兑现。按 JSON 输出。）' + imageInstruction(pool) });
 
-  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 220 });
+  const res = await withUsage('promise', () => chatCompletion(msgs, { temperature: 1, maxTokens: 220 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const { think, say } = parseThinkSay(res.text);
@@ -171,7 +172,7 @@ export async function generateMood({ pet, now = new Date(), history = [], mood =
   }
   msgs.push({ role: 'user', content: '（现在决定发不发。按 JSON 输出。）' });
 
-  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 160 });
+  const res = await withUsage('mood', () => chatCompletion(msgs, { temperature: 1, maxTokens: 160 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const { think, say } = parseThinkSay(res.text);

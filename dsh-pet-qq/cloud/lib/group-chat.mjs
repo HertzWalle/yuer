@@ -9,6 +9,7 @@
  */
 
 import { chatCompletion } from './llm.mjs';
+import { withUsage } from './usage.mjs';
 import { extractChatImage, imageInstruction } from './memes.mjs';
 import { composeSystemPrompt } from './prompt.mjs';
 import { parseThinkSay } from './proactive.mjs';
@@ -66,7 +67,7 @@ export async function scoreChatter({ ctx, now = new Date(), buffer = [], group =
     { role: 'user', content: `最近的群聊：\n${transcriptOf(buffer)}\n\n现在该不该开口？` },
   ];
 
-  const res = await chatCompletion(msgs, { temperature: 0.6, maxTokens: 80 });
+  const res = await withUsage('group', () => chatCompletion(msgs, { temperature: 0.6, maxTokens: 80 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const text = String(res.text || '');
@@ -125,7 +126,7 @@ export async function draftGroupMessage({ ctx, now = new Date(), buffer = [], po
     { role: 'user', content: `最近的群聊：\n${transcriptOf(buffer)}\n\n你要说什么？` },
   ];
 
-  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 200 });
+  const res = await withUsage('group', () => chatCompletion(msgs, { temperature: 1, maxTokens: 200 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const { think, say } = parseThinkSay(res.text);
@@ -171,7 +172,7 @@ export async function draftOpener({ ctx, now = new Date(), buffer = [], pool = [
     { role: 'user', content: `${recent}你要说什么？` },
   ];
 
-  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 160 });
+  const res = await withUsage('group', () => chatCompletion(msgs, { temperature: 1, maxTokens: 160 }));
   if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
 
   const { think, say } = parseThinkSay(res.text);
