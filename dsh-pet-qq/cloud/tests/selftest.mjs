@@ -617,18 +617,28 @@ async function testBubbles() {
   check('短句默认整条', short.length === 1, JSON.stringify(short));
 
   const short2 = splitBubbles('今天天气不错，出来走走吧。', { rng: () => 0 });
-  check('短句按概率拆两条', short2.length === 2, JSON.stringify(short2));
+  check('短句一律不拆（哪怕掷到 0）', short2.length === 1, JSON.stringify(short2));
 
   const mid = '我跟你说啊，今天下午服务器又抽风了，重启了三回才活过来，最后发现是内存不够，真是服了。';
-  const midOne = splitBubbles(mid, { rng: () => 0 });
-  check('中长段落可以整段一条（长段落模式）', midOne.length === 1 && midOne[0].length === mid.length, `${midOne.length} 条 / ${mid.length} 字`);
+  const midOne = splitBubbles(mid, { rng: () => 0.99 });
+  check('中长段落默认整段一条', midOne.length === 1 && midOne[0].length === mid.length, `${midOne.length} 条 / ${mid.length} 字`);
+  const midTwo = splitBubbles(mid, { rng: () => 0 });
+  check(
+    '中长段落偶尔拆两条，且两边都是完整句子',
+    midTwo.length === 2 && midTwo.every((x) => x.length >= 6) && !midTwo[0].endsWith('，'),
+    JSON.stringify(midTwo),
+  );
+
+  // 回归：不能把词切开（之前「稻穗」被切成「稻」「穗」）
+  const wordCut = splitBubbles('群里表情包都认全了。 稻穗加这脸，除了黍还能是谁。', { rng: () => 0 });
+  check('不会把词切成两半', wordCut.length === 1 && wordCut[0].includes('稻穗'), JSON.stringify(wordCut));
 
   const longOne = '啊'.repeat(120);
   const longParts = splitBubbles(longOne, { rng: () => 0 });
   check('超长且没有句读时不硬拆', longParts.length === 1, `${longParts.length} 条`);
 
   const many = splitBubbles('第一句\n第二句\n第三句\n第四句\n第五句\n第六句\n第七句\n第八句\n第九句');
-  check('气泡软上限 6 条', many.length === 6, `${many.length} 条`);
+  check('气泡软上限 3 条', many.length === 3, `${many.length} 条`);
 
   // 纯动作的短句不该单独成条（模型偶尔会这样）
   const { tidyBubbles } = petApi;

@@ -369,17 +369,74 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 - **降级**：看图失败（链接过期、超时、格式不认）就退回 `[图片]`，绝不因为看图失败而不回消息。
 - **不再写舞台指示**：`stripActionNotes()` 会抹掉「（歪头）」「（尾巴摇了一下）」这类括号动作，
   情绪靠语气词和句子本身（「本鲸尾巴都翘起来了」）；「（DeepSeek）」这种专有名词的括号保留。
-### 对话节奏（像真人那样连发几条）
+### 对话节奏（默认一条，需要才拆）
 
-一条回复可以是一整段、也可以是 **2~6 个气泡**，条数由内容决定，不再写死：
+**默认一条说完**，只在内容确实长的时候拆 2~3 条；每条都是一句完整的话，**绝不会把词从中间劈开**（v1.13.0 修的就是「稻穗」被切成「稻」「穗」）。
 
-- 模型侧：`REPLY_STYLE` 让它自己选——「想连发就分成 2~4 条短句（每条约 20 字）；想一口气说完就整段一条，别为了拆而拆」。
-- 拆分侧：`splitBubbles(text, { max, bias })` 先看模型有没有自己分段（换行/`||`）；只给一段时按字数决定形态——≤30 字多数整条（30% 概率断成两条）、30~90 字有 40% 保持整段一条（长段落模式）否则切 2~3 条、>90 字**默认整段一条**，只有句读 ≥2 才按句子切、最多 4 条（没标点的长文绝不硬拆）。
-- 软上限：`maxBubbles`（`pet.json`，默认 6、上限 8）；超了不做「全塞最后一条」，而是**反复合并最短的相邻一对**，保住说话的节奏。允许「嗯」「好」这种两字气泡单独成条。
-- 想到一句再补：最后一条如果 ≤12 字，发送侧会多等 `behavior.tailPauseMs`（默认 800ms）——像打完一句又想起半句。
-- 发送侧：第一条等 `typingDelayMs`（默认 300ms），之后每条 `bubbleDelayMs`（700ms）+ 字数×22ms（≤600）+ 0~250ms 随机，短句快、长句慢。
-- 调参：`behavior.maxBubbles` / `tailPauseMs` / `bubbleDelayMs`；`cloud/data/pet.json` 的 `maxBubbles` / `splitChance`（0.5 基准，调大更容易拆、调小更容易整段）。
-- 记忆里存的是拼起来的一整段（`segments.join(' ')`），所以下次读历史不会碎成一堆短句。
+- 模型侧 `REPLY_STYLE`：「默认一条说完，需要分开时最多两条，只有讲步骤/交代几件事才用第三条」。
+- 拆分侧 `splitBubbles(text, { max, bias })`：模型自己分段（换行 / `||`）就照收；只给一段时——
+  ≤40 字一律一条；40~120 字多数整条，偶尔（约 30% × `splitChance`）按标点拆两条，两边都 ≥6 字；
+  >120 字且有 ≥2 个句读才拆，最多 2 条（句读很多才 3 条）；**没有标点就绝不拆**（原来按字数硬切是切词的元凶，已删）。
+- 软上限：`maxBubbles`（`pet.json` 默认 3，代码里夹在 1~4）；超了不做「全塞最后一条」，而是反复合并最短的相邻一对。
+- 想到一句再补：最后一条 ≤12 字时，发送侧多等 `behavior.tailPauseMs`（默认 800ms）。
+- 发送节奏：第一条等 `typingDelayMs`（300ms），之后每条 `bubbleDelayMs`（700ms）+ 字数×22ms（≤600）+ 0~250ms 随机。
+- 记忆里存的是拼起来的一整段，下次读历史不会碎。
+
+### 调参对照表（自己改这些，不用改代码）
+
+改完都执行 `sudo systemctl restart dsh-pet-bot`（`pet.json` 与 `bridge.config.json` 都是启动时读）。JSON 要保证格式正确，改坏了用 `sudo cp /opt/dsh-pet/data/pet.json.bak …` 回滚。
+
+**`/opt/dsh-pet/bridge.config.json`**
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `proactive.impulseThreshold` | 58 | 冲动到多少才主动私聊（调高=更少打扰） |
+| `proactive.impulseCost` | 38 | 说一条扣多少冲动 |
+| `proactive.ratePerHour` | 9 | 每小时攒多少冲动（≈多久想说话一次） |
+| `proactive.dailyLimit` | 8 | 私聊每天最多主动说几条 |
+| `proactive.minGapMin` | 35 | 两条主动消息最小间隔（分钟） |
+| `proactive.quietHours` | `["23:30","07:30"]` | 静默时段 |
+| `proactive.recentGuardMin` | 20 | 你刚说过话多久内不打扰 |
+| `proactive.tickSec` | 300 | 多久算一次（秒） |
+| `behavior.coalesceMs` | 1600 | 连发合并窗口（你连发几条只回一次），0=关 |
+| `behavior.followUpMinutes` | 12 | 群里被 @ 之后多久内不 @ 也算跟她说话，0=关 |
+| `behavior.maxBubbles` | 3 | 一次最多几条气泡（上限 4） |
+| `behavior.bubbleDelayMs` / `typingDelayMs` / `tailPauseMs` | 700 / 300 / 800 | 气泡之间的节奏 |
+| `behavior.voice.enabled` / `chance` / `privateOnly` / `voice` | true / 0.15 / true / `zh-CN-XiaoyiNeural` | 语音（Edge TTS，只在私聊、按概率） |
+| `behavior.observeGroups` | true | 群里旁听（false=完全不参与群聊） |
+| `proactive.ownerIds` | `["1360153202"]` | 谁能用指令 |
+
+**`/opt/dsh-pet/data/pet.json`**
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `maxBubbles` | 3 | 一次最多几条气泡 |
+| `splitChance` | 0.35 | 拆两条的倾向（调大更容易拆，调小更容易整段） |
+| `memeChancePrivate` | 0.22 | 私聊带表情包的概率 |
+| `memeChanceGroup` | 0.08 | 群里带表情包的概率 |
+| `memeCooldown` | 5 | 连着几条带过图就不再带 |
+| `memory.maxHistoryTokens` | 900 | 上下文预算（超了自动压缩成摘要） |
+| `memory.compressAt` | 0.82 | 用到预算的这个比例才开始压 |
+| `memory.keepRecentRatio` | 0.15 | 保留最近多少比例不压 |
+| `feeds.enabled` / `feeds.hours` | true / `[10,20]` | B 站热门 + 抖音热搜什么时候看 |
+| `qzone.enabled` / `readHour` / `publishEnabled` / `dryRun` / `dailyLimit` | true / 21 / true / true / 1 | 空间读动态、发说说（`dryRun:true` 只生成不发） |
+| `surfaces.private` / `surfaces.group` / `surfaces.groups{群号}` | xiaolan / niyujie / — | 私聊、群聊默认、按群人设 |
+
+**`proactive.group`（`bridge.config.json` 与 `pet.json` 都有，服务器以 `pet.json` 为准）**
+
+| 键 | 默认 | 作用 |
+| --- | --- | --- |
+| `dailyLimit` | `{hot:100, normal:40, quiet:20, dead:6}` | 每个群每天最多说几条（按活跃度档位） |
+| `hourLimit` | `{hot:15, normal:10, quiet:4, dead:2}` | 每小时上限 |
+| `minGapSec` | `{hot:75, normal:240, quiet:900, dead:3600}` | 两次开口最小间隔（秒） |
+| `urgencyMin` | `{hot:8, normal:9, quiet:10, dead:13}` | 机会分门槛（调高=更少插话） |
+| `shareCap` | 0.12 | 她的话不超过群消息量的比例（防刷屏） |
+| `idleOpenMin` | 25 | 群安静多久后可以主动开场（分钟） |
+| `openerPerHour` | `{quiet:1.5, dead:0.8}` | 冷清/死寂群每小时主动开场的概率 |
+| `perMessage` / `ratePerHour` | 3 / 6 | 群里每条消息加多少冲动、每小时涨多少 |
+| `activity` | `{windowSec:300, hotPerMin:6, normalPerMin:1.2, quietPerMin:0.2, …}` | 活跃度分档阈值 |
+
+**`.env`**：`DEEPSEEK_TEMPERATURE`（默认 0.85，越大越发散）、`DEEPSEEK_MODEL`、`TURN_TOKEN`、`BACKUP_TOKEN`。
 
 ### 更像真人：连发合并 / 画像 / 规矩 / 账本 / 语音（v1.11.0）
 

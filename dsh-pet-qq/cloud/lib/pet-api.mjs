@@ -339,11 +339,12 @@ export function stripInternal(text = '') {
 }
 
 /** 与人格无关的「打字习惯」硬约束：模型经常忘了字数上限，这句每轮都提醒它 */
-const REPLY_STYLE =
-  '\n\n【回复方式】像在 QQ 上跟人聊天：' +
-  '想连发就分成 2~4 条短句（用换行隔开，每条尽量 20 字以内）；' +
-  '想一口气说完就整段一条，别为了拆而拆。' +
-  '不管几条，先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。';
+const REPLY_STYLE = `
+
+【回复方式】像在 QQ 上跟人聊天：
+**默认一条说完**，需要分开时最多两条，每条都是一句完整的话（别把词拆开），也别一条里套三层意思；
+只有内容确实长（讲步骤、交代几件事）才用第三条，一般不超过三条，每条尽量 20 字以内。
+先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。`;
 
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
@@ -405,7 +406,7 @@ export function tidyBubbles(segments = []) {
   return out.length ? out : segments;
 }
 
-export function splitBubbles(text, { max = 6, bias = 0.5, rng = Math.random } = {}) {
+export function splitBubbles(text, { max = 3, bias = 0.35, rng = Math.random } = {}) {
   const raw = String(text ?? '');
   let parts = normalizeParts(raw);
   if (!parts.length) return [];
@@ -445,32 +446,27 @@ function normalizeParts(raw) {
     .filter((s) => s && !/^[。！？!?，,、；;…]+$/.test(s));
 }
 
-/** 只有一整句时：按长度分档决定摊成几条 */
-function reshapeSingle(one, { bias = 0.5, rng = Math.random } = {}) {
+/** 只有一整句时：默认一条；够长且有句读时才拆成两条 */
+function reshapeSingle(one, { bias = 0.35, rng = Math.random } = {}) {
   const len = one.length;
-  // bias 0.5 → 系数 1；bias 1 → 1.5 倍；bias 0 → 0.5 倍
-  const p = (base) => Math.min(0.95, Math.max(0.05, base * (0.5 + bias)));
+  const p = (base) => Math.min(0.95, Math.max(0.05, base * (0.6 + bias)));
 
-  if (len <= 30) {
-    if (rng() < p(0.3)) {
+  // 40 字以内：一句话说完，绝不拆
+  if (len <= 40) return [one];
+
+  const sentences = (one.match(/[。！？!?；;\n]/g) ?? []).length;
+  // 40~120 字：多数整条，少数按标点拆两条（拆点必须在标点处，保证两边都是完整的句子）
+  if (len <= 120) {
+    if (sentences >= 1 && rng() < p(0.3)) {
       const two = cutInTwo(one);
       if (two) return two;
     }
     return [one];
   }
 
-  if (len <= 90) {
-    if (rng() < p(0.4)) return [one]; // 长段落模式：一口气说完
-    const n = rng() < 0.55 ? 2 : 3;
-    const chunks = chunkTo(one, n);
-    if (chunks.length > 1) return chunks;
-    return cutInTwo(one) ?? [one];
-  }
-
-  // >90：整段一条最像人；只有确实有句读（≥2 个句子收尾）时才切
-  const sentenceCount = (one.match(/[。！？!?；;\n]/g) ?? []).length;
-  if (sentenceCount < 2) return [one];
-  return capParts(sentenceChunks(one, LONG_BUBBLE), 4);
+  // 120 字以上：确实有句读才拆，最多两条（很长才三条）
+  if (sentences < 2) return [one];
+  return capParts(sentenceChunks(one, LONG_BUBBLE), sentences >= 4 ? 3 : 2);
 }
 
 /** 在标点处断成两条；断不开返回 null */
@@ -482,17 +478,8 @@ function cutInTwo(s) {
     .slice(cut)
     .replace(/^[。！？!?，,、；;…\s]+/, '')
     .trim();
-  if (left.length < 5 || right.length < 2) return null;
+  if (left.length < 8 || right.length < 6) return null;
   return [left, right];
-}
-
-/** 尽量摊成 n 条：句子够就按句攒，不够再按逗号硬切 */
-function chunkTo(text, n) {
-  const sentences = sentenceChunks(text, LONG_BUBBLE);
-  if (sentences.length >= n) return capParts(sentences, n);
-  const rough = splitRough(text, Math.max(8, Math.ceil(text.length / n)));
-  if (rough.length >= n) return capParts(rough, n);
-  return rough;
 }
 
 /** 超过 n 条时，把多出来的并进最后一条（太长就截断） */
@@ -524,10 +511,10 @@ function sentenceChunks(text, limit) {
     }
   }
   if (buf) out.push(buf);
-  return out.flatMap((x) => (x.length <= limit ? [x] : splitRough(x, limit)));
+  return out;
 }
 
-/** 没有标点可切时的兜底：按逗号硬切，再不行按字数切 */
+/** 没有句号可切时的兜底：只按逗号切；还长就保持一条（绝不按字数切，会切断词） */
 function splitRough(text, limit) {
   const parts = text.split(/(?<=[，,、])/);
   const out = [];
@@ -541,12 +528,7 @@ function splitRough(text, limit) {
     }
   }
   if (buf) out.push(buf);
-  return out.flatMap((x) => {
-    if (x.length <= limit) return [x];
-    const pieces = [];
-    for (let i = 0; i < x.length; i += limit) pieces.push(x.slice(i, i + limit));
-    return pieces;
-  });
+  return out.filter((x) => x.trim());
 }
 
 /** 截到 limit 以内并在标点处收尾，避免半句话 */
@@ -669,7 +651,7 @@ export async function chat(
     stripInternal(image ? parsed.text : stripMemeTag(parsed.text)).trim() || stripInternal(res.text).trim();
 
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
-  const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(conf.maxBubbles) || 6)));
+  const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(conf.maxBubbles) || 3)));
   const bias = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
   const segments = tidyBubbles(splitBubbles(stripActionNotes(finalText), { max: maxBubbles, bias }));
   const stored = (segments.length ? segments.join(' ') : finalText).trim();

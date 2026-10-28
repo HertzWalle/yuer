@@ -15,7 +15,7 @@
     "typingDelayMs": 300,
     "logMessages": true,
     "errorReply": "呜……脑袋卡住了，等我一下下。",
-    "maxBubbles": 6,
+    "maxBubbles": 3,
     "bubbleDelayMs": 700,
     "tailPauseMs": 800,
     "coalesceMs": 1600,

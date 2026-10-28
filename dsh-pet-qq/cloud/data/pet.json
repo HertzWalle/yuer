@@ -65,8 +65,8 @@
     "股票涨了": "用于讨论股票基金涨了的场景",
     "说股票": "用于讨论股票基金的场景，低频"
   },
-  "maxBubbles": 6,
-  "splitChance": 0.5,
+  "maxBubbles": 3,
+  "splitChance": 0.35,
   "memeChancePrivate": 0.22,
   "memeChanceGroup": 0.08,
   "memeCooldown": 5,
