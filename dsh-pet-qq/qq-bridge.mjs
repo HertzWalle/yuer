@@ -560,8 +560,10 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       }
     }
 
-    if (sent) stats.replied += 1;
-    else stats.failed += 1;
+    if (sent) {
+      stats.replied += 1;
+      markTalkedTo(msg);
+    } else stats.failed += 1;
     return sent ? true : null;
   }
 
@@ -968,6 +970,32 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
    * 只由**第一条**负责跑一次生成——其余几条的信道信息（旁听、引用、@）照样各自记下。
    */
   const coalesceMs = Math.max(0, Number(behavior.coalesceMs ?? 1600));
+
+  /**
+   * 群里的「追问窗口」：群友 @ 过她、或者她刚回过这个人，接下来 followUpMinutes 分钟内
+   * 他再说话（不 @、不引用）也算在跟她说——真人聊天不会每句都点名。
+   * 只认「跟她对过话的那个人」，别人照旧旁听，避免变成无脑接话。
+   */
+  const followUpMs = Math.max(0, Number(behavior.followUpMinutes ?? 12) * 60_000);
+  const talkedTo = new Map(); // `group:<gid>:<uid>` -> 时间戳
+
+  function markTalkedTo(msg) {
+    if (!followUpMs || msg.kind !== 'group' || !msg.senderId || !msg.groupId) return;
+    talkedTo.set(`${msg.groupId}:${msg.senderId}`, Date.now());
+    if (talkedTo.size > 500) talkedTo.clear();
+  }
+
+  function inFollowUp(msg) {
+    if (!followUpMs || msg.kind !== 'group' || !msg.senderId || !msg.groupId) return false;
+    const key = `${msg.groupId}:${msg.senderId}`;
+    const at = Number(talkedTo.get(key) || 0);
+    if (!at) return false;
+    if (Date.now() - at > followUpMs) {
+      talkedTo.delete(key);
+      return false;
+    }
+    return true;
+  }
   const pendingBatch = new Map(); // conv -> { items, waiters, timer }
 
   function collectBatch(conv, msg) {
@@ -1055,10 +1083,19 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         log.info(`${msg.senderName} 引用了她说过的话，当成本群在对她说话`);
       }
     }
+    // 追问窗口：刚跟她说过话的人在接着聊，不 @ 也算在问她
+    if (msg.observeOnly && inFollowUp(msg)) {
+      msg.observeOnly = false;
+      msg.addressedByFollowUp = true;
+      log.info(`${msg.senderName} 在接着刚才的话题说话，当成本群在对她说话`);
+    }
     if (msg.observeOnly) {
       stats.ignored += 1;
       return null;
     }
+
+    // 她开始跟这个人对话了：@ 她、引用她、或已经在追问窗口里——窗口从这一刻重新计时
+    if (msg.atMe || msg.addressedByQuote || msg.addressedByFollowUp) markTalkedTo(msg);
 
     const key = msg.kind === 'group' ? `g:${msg.groupId}` : `u:${msg.senderId}`;
     const conv = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;

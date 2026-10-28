@@ -21,26 +21,26 @@ export const GROUP_DEFAULTS = {
   /** 判活跃度用的滑动窗口（秒）与分档阈值（条/分钟） */
   activity: { windowSec: 300, upHoldSec: 180, downHoldSec: 900, hotPerMin: 6, normalPerMin: 1.2, quietPerMin: 0.2 },
   /** 每个群每天最多说多少条（热闹群上限 100，用户指定） */
-  dailyLimit: { hot: 100, normal: 40, quiet: 12, dead: 3 },
+  dailyLimit: { hot: 100, normal: 40, quiet: 20, dead: 6 },
   /** 每小时上限，防止一口气刷完 */
-  hourLimit: { hot: 15, normal: 8, quiet: 2, dead: 1 },
+  hourLimit: { hot: 15, normal: 10, quiet: 4, dead: 2 },
   /** 两次开口的最小间隔（秒） */
-  minGapSec: { hot: 90, normal: 300, quiet: 1800, dead: 7200 },
+  minGapSec: { hot: 75, normal: 240, quiet: 900, dead: 3600 },
   /** 机会分要到多少才值得开口（热闹档机会多、门槛低；死寂档只在真好聊时开口） */
-  urgencyMin: { hot: 9, normal: 11, quiet: 14, dead: 18 },
+  urgencyMin: { hot: 8, normal: 9, quiet: 10, dead: 13 },
   /** 她的话在同一小时内不超过群消息量的这个比例（防刷屏） */
   shareCap: 0.12,
   /** 群里安静多久算「冷清到可以主动开场」 */
-  idleOpenMin: 45,
+  idleOpenMin: 25,
   /** 冷清群每小时主动开场的概率 */
-  openerPerHour: { quiet: 0.5, dead: 0.25 },
+  openerPerHour: { quiet: 1.5, dead: 0.8 },
   /** 回声率（她说话后 10 分钟内有人接的比例）对配额的影响 */
   echoBoost: 1.2,
   echoPenalty: 0.7,
 
   /* ---------- 旧参数：保留给冲动模型与兼容旧配置 ---------- */
   /** 群里的冲动攒得比私聊慢：私聊 6/h，群聊 3/h */
-  ratePerHour: 3,
+  ratePerHour: 6,
   /** 群里开口的门槛更高（私聊 70） */
   threshold: 120,
   /** 开口一次扣得多（私聊 45） */
@@ -56,7 +56,7 @@ export const GROUP_DEFAULTS = {
   /** 旁听缓冲保留多少条 */
   bufferMax: 30,
   /** 一条普通消息加多少冲动 */
-  perMessage: 2,
+  perMessage: 3,
   /** 被 @ 到加多少（等同于「有人在问我」） */
   mentionBonus: 20,
   /** 话题命中她记得的事，加多少 */

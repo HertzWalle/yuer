@@ -444,6 +444,7 @@ async function main() {
   await testProfiles();
   await testUsage();
   await testCoalesce();
+  await testFollowUp();
   await testVoiceGate();
 
   await testAgency();
@@ -923,6 +924,65 @@ async function testCoalesce() {
   );
 }
 
+async function testFollowUp() {
+  const localSent = [];
+  const localTransport = {
+    async send(msg, segments) {
+      localSent.push({ to: `${msg.kind}:${msg.groupId ?? msg.senderId}`, segments });
+      return { message_id: localSent.length + 20_000 };
+    },
+    async call(action, params) {
+      if (action === 'get_group_member_info') {
+        return { group_id: params.group_id, user_id: params.user_id, card: '', nickname: `群友${params.user_id}` };
+      }
+      throw new Error('不支持');
+    },
+  };
+  const groupEv = (id, text, uid, extra = {}) =>
+    ev({
+      message_type: 'group',
+      group_id: 424242,
+      message_id: id,
+      user_id: uid,
+      sender: { user_id: uid, nickname: `群友${uid}`, card: '' },
+      message: [{ type: 'text', data: { text } }],
+      ...extra,
+    });
+
+  mock.setReplyResolver(() => '嗯，我听着呢。');
+  const c3 = { ...conf, behavior: { ...conf.behavior, coalesceMs: 0, followUpMinutes: 12 } };
+  const b3 = createBridge({ conf: c3, personas, transport: localTransport, log: quiet });
+  // 群友 @ 她
+  await b3.handleEvent(
+    groupEv('fu-1', '鱼儿在吗', 31001, { message: [{ type: 'at', data: { qq: '10000' } }, { type: 'text', data: { text: ' 鱼儿在吗' } }] }),
+  );
+  const afterAt = localSent.length;
+  // 同一个人接着说话，不 @、不引用
+  await b3.handleEvent(groupEv('fu-2', '刚才那个报错你怎么看', 31001));
+  const afterFollow = localSent.length;
+  // 另一个人插话，不在窗口里，应该不接
+  await b3.handleEvent(groupEv('fu-3', '我这边也有个问题', 31002));
+  const afterOther = localSent.length;
+  mock.setReplyResolver(null);
+
+  check('追问窗口：@ 过她的人接着说不 @ 也回', afterAt >= 1 && afterFollow > afterAt, `@ 之后 ${afterAt} 条，追加一句后 ${afterFollow} 条`);
+  check('追问窗口：不相关的群友仍在旁听', afterOther === afterFollow, `第三人插话后 ${afterOther} 条`);
+
+  // 窗口关掉就不该接
+  mock.setReplyResolver(() => '嗯，我听着呢。');
+  const c4 = { ...conf, behavior: { ...conf.behavior, coalesceMs: 0, followUpMinutes: 0 } };
+  const b4 = createBridge({ conf: c4, personas, transport: localTransport, log: quiet });
+  const before = localSent.length;
+  await b4.handleEvent(
+    groupEv('fu-4', '鱼儿在吗', 31003, { message: [{ type: 'at', data: { qq: '10000' } }, { type: 'text', data: { text: ' 鱼儿在吗' } }] }),
+  );
+  const mid = localSent.length;
+  await b4.handleEvent(groupEv('fu-5', '再问一句', 31003));
+  const after = localSent.length;
+  mock.setReplyResolver(null);
+  check('追问窗口：关掉后不 @ 就不接', mid > before && after === mid, `@ 之后 ${mid - before} 条，追问后新增 ${after - mid} 条`);
+}
+
 async function testVoiceGate() {
   const tts = await load('tts.mjs');
   check('语音：私聊按概率放行', tts.shouldSpeak({ enabled: true, chance: 1, privateOnly: true }, { kind: 'private' }) === true);
@@ -1209,8 +1269,8 @@ async function testAgency() {
     const qQuiet = groupsMod.quotaOf(mk(3, now), fakeNow, groupsMod.GROUP_DEFAULTS);
     const qDead = groupsMod.quotaOf(mk(0, now), fakeNow, groupsMod.GROUP_DEFAULTS);
     check('热闹群每天上限 100', qHot.tier === 'hot' && qHot.daily === 100, `${qHot.tier}/${qHot.daily}`);
-    check('冷清群每天上限 12', qQuiet.tier === 'quiet' && qQuiet.daily === 12, `${qQuiet.tier}/${qQuiet.daily}`);
-    check('死寂群每天上限 3', qDead.tier === 'dead' && qDead.daily === 3, `${qDead.tier}/${qDead.daily}`);
+    check('冷清群每天上限 20', qQuiet.tier === 'quiet' && qQuiet.daily === 20, `${qQuiet.tier}/${qQuiet.daily}`);
+    check('死寂群每天上限 6', qDead.tier === 'dead' && qDead.daily === 6, `${qDead.tier}/${qDead.daily}`);
   }
 
   // 13.7 到配额就闭嘴（100 条打满）

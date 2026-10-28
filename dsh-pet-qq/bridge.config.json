@@ -28,7 +28,8 @@
       "voice": "zh-CN-XiaoyiNeural",
       "maxChars": 60
     },
-    "voiceDelayMs": 400
+    "voiceDelayMs": 400,
+    "followUpMinutes": 12
   },
   "proactive": {
     "enabled": true,
@@ -40,18 +41,18 @@
       "23:30",
       "07:30"
     ],
-    "impulseThreshold": 70,
-    "impulseCost": 45,
-    "ratePerHour": 6,
+    "impulseThreshold": 58,
+    "impulseCost": 38,
+    "ratePerHour": 9,
     "recentBonus": 3,
-    "dailyLimit": 5,
-    "minGapMin": 50,
+    "dailyLimit": 8,
+    "minGapMin": 35,
     "recentGuardMin": 20,
     "commitmentLeadMin": 20,
     "dryRun": false,
     "group": {
       "enabled": true,
-      "ratePerHour": 3,
+      "ratePerHour": 6,
       "threshold": 120,
       "cost": 120,
       "dailyPerGroup": 1,
@@ -59,7 +60,7 @@
       "scoreMin": 7,
       "bufferMin": 3,
       "bufferMax": 30,
-      "perMessage": 2,
+      "perMessage": 3,
       "mentionBonus": 20,
       "topicBonus": 15,
       "positiveBonus": 5,
@@ -74,32 +75,32 @@
       "dailyLimit": {
         "hot": 100,
         "normal": 40,
-        "quiet": 12,
-        "dead": 3
+        "quiet": 20,
+        "dead": 6
       },
       "hourLimit": {
         "hot": 15,
-        "normal": 8,
-        "quiet": 2,
-        "dead": 1
+        "normal": 10,
+        "quiet": 4,
+        "dead": 2
       },
       "minGapSec": {
-        "hot": 90,
-        "normal": 300,
-        "quiet": 1800,
-        "dead": 7200
+        "hot": 75,
+        "normal": 240,
+        "quiet": 900,
+        "dead": 3600
       },
       "urgencyMin": {
-        "hot": 9,
-        "normal": 11,
-        "quiet": 14,
-        "dead": 18
+        "hot": 8,
+        "normal": 9,
+        "quiet": 10,
+        "dead": 13
       },
       "shareCap": 0.12,
-      "idleOpenMin": 45,
+      "idleOpenMin": 25,
       "openerPerHour": {
-        "quiet": 0.5,
-        "dead": 0.25
+        "quiet": 1.5,
+        "dead": 0.8
       }
     }
   },
