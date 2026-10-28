@@ -493,27 +493,67 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       .slice(0, maxBubbles);
 
     let sent = 0;
-    for (let i = 0; i < bubbles.length; i += 1) {
-      const piece = bubbles[i];
-      // 第一条按「正在输入」延迟；之后每条模拟继续打字——短句快、长句慢，再加一点随机。
-      // 最后一条如果很短（「嗯」「好」「对了」），多等一会儿：真人补一句前会停一下。
-      const isTail = i === bubbles.length - 1 && i > 0 && piece.length <= 12;
-      const wait =
-        i === 0
-          ? Number(behavior.typingDelayMs) || 0
-          : Math.max(0, Number(behavior.bubbleDelayMs) || 700) +
-            Math.min(600, piece.length * 22) +
-            Math.random() * 250 +
-            (isTail ? Math.max(0, Number(behavior.tailPauseMs) || 800) : 0);
-      if (wait) await new Promise((r) => setTimeout(r, wait));
-      // 只有第一条带引用段：后面几条继续接在同一个话头上
-      const segments = [{ type: 'text', data: { text: piece } }];
-      if (i === 0 && shouldQuote(msg)) segments.unshift({ type: 'reply', data: { id: String(msg.messageId) } });
-      const r = await transport.send(msg, segments);
-      if (r) sent += 1;
-      else {
-        log.warn('气泡发送失败，剩下的不发了');
-        break;
+
+    /**
+     * 语音优先：主人明确要语音（「语音呢」「唱两句」）就绕过概率、只发语音不发文字；
+     * 随机语音也一样——发出去就只留语音。合成失败（没装 edge-tts / 抽风）才退回文字，
+     * 绝不因为语音挂了变成「没回」。
+     */
+    const voiceConf = behavior.voice || {};
+    const wantVoice = Boolean(reply?.voiceWanted);
+    let voiceSent = false;
+    if ((voiceConf.enabled !== false) && text && (msg.kind === 'private' || voiceConf.privateOnly === false)) {
+      try {
+        const tts = await import('./lib/tts.mjs').catch(() => null);
+        if (tts?.shouldSpeak?.(voiceConf, { kind: msg.kind, forced: wantVoice }) && tts?.synthesizeBuffer) {
+          const speakLine = bubbles.join(' ') || text;
+          const spoken = await tts.synthesizeBuffer(speakLine, { conf: voiceConf });
+          if (spoken?.ok && spoken.buffer) {
+            if (behavior.voiceDelayMs) await new Promise((r) => setTimeout(r, Number(behavior.voiceDelayMs)));
+            const r = await transport.send(msg, [
+              { type: 'record', data: { file: `base64://${spoken.buffer.toString('base64')}` } },
+            ]);
+            if (r) {
+              sent += 1;
+              voiceSent = true;
+            } else {
+              log.warn('语音发送失败，退回文字');
+            }
+          } else if (spoken && spoken.reason !== 'empty-text') {
+            log.warn(
+              `语音合成失败（${wantVoice ? '主人要的语音' : '随机语音'}）：${spoken.reason} ${spoken.message ?? ''}，退回文字`,
+            );
+          }
+        }
+      } catch (e) {
+        log.warn(`语音流程异常：${e?.message ?? e}`);
+      }
+    }
+
+    // 语音发出去了就不再发文字气泡；没发才走文字
+    if (!voiceSent) {
+      for (let i = 0; i < bubbles.length; i += 1) {
+        const piece = bubbles[i];
+        // 第一条按「正在输入」延迟；之后每条模拟继续打字——短句快、长句慢，再加一点随机。
+        // 最后一条如果很短（「嗯」「好」「对了」），多等一会儿：真人补一句前会停一下。
+        const isTail = i === bubbles.length - 1 && i > 0 && piece.length <= 12;
+        const wait =
+          i === 0
+            ? Number(behavior.typingDelayMs) || 0
+            : Math.max(0, Number(behavior.bubbleDelayMs) || 700) +
+              Math.min(600, piece.length * 22) +
+              Math.random() * 250 +
+              (isTail ? Math.max(0, Number(behavior.tailPauseMs) || 800) : 0);
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+        // 只有第一条带引用段：后面几条继续接在同一个话头上
+        const segments = [{ type: 'text', data: { text: piece } }];
+        if (i === 0 && shouldQuote(msg)) segments.unshift({ type: 'reply', data: { id: String(msg.messageId) } });
+        const r = await transport.send(msg, segments);
+        if (r) sent += 1;
+        else {
+          log.warn('气泡发送失败，剩下的不发了');
+          break;
+        }
       }
     }
 
@@ -525,8 +565,8 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
           { type: 'image', data: { file: `base64://${buf.toString('base64')}` } },
         ]);
         if (r) sent += 1;
-        else log.warn(`表情包「${reply.image}」发送失败（文字已发）`);
-      } else if (!text) {
+        else log.warn(`表情包「${reply.image}」发送失败`);
+      } else if (!sent && !text) {
         await transport.send(msg, [{ type: 'text', data: { text: `（想发「${reply.image}」那张图，但找不到）` } }]);
         sent += 1;
       }
@@ -535,29 +575,6 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     if (!sent) {
       const r = await transport.send(msg, [{ type: 'text', data: { text: text || '……' } }]);
       if (r) sent += 1;
-    }
-
-    // 语音：只私聊、只按概率，合成失败就当没这回事（绝不因为语音挂掉把文字也丢了）
-    const voiceConf = behavior.voice || {};
-    if (voiceConf.enabled !== false && msg.kind === 'private' && text) {
-      try {
-        const tts = await import('./lib/tts.mjs').catch(() => null);
-        if (tts?.shouldSpeak?.(voiceConf, { kind: msg.kind }) && tts?.synthesizeBuffer) {
-          const spoken = await tts.synthesizeBuffer(text, { conf: voiceConf });
-          if (spoken?.ok && spoken.buffer) {
-            if (behavior.voiceDelayMs) await new Promise((r) => setTimeout(r, Number(behavior.voiceDelayMs)));
-            const r = await transport.send(msg, [
-              { type: 'record', data: { file: `base64://${spoken.buffer.toString('base64')}` } },
-            ]);
-            if (r) sent += 1;
-            else log.warn('语音发送失败（文字已发）');
-          } else if (spoken && spoken.reason !== 'empty-text') {
-            log.warn(`语音合成失败：${spoken.reason} ${spoken.message ?? ''}`);
-          }
-        }
-      } catch (e) {
-        log.warn(`语音流程异常：${e?.message ?? e}`);
-      }
     }
 
     if (sent) {

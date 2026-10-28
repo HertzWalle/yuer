@@ -1009,6 +1009,45 @@ async function testVoiceGate() {
     cleaned,
   );
   check('语音：空文本直接跳过', (await tts.synthesize('（歪头）')).ok === false);
+
+  // 主人明确要语音：不看概率
+  check(
+    '语音：主人要语音时绕过概率',
+    tts.shouldSpeak({ enabled: true, chance: 0, privateOnly: true }, { kind: 'private', forced: true }) === true,
+  );
+  check(
+    '语音：群里即使被要求也不发',
+    tts.shouldSpeak({ enabled: true, chance: 1, privateOnly: true }, { kind: 'group', forced: true }) === false,
+  );
+
+  // 「语音呢」「唱两句」要被认出来
+  const { wantsVoice } = petApi;
+  check('识别：语音呢', wantsVoice('语音呢？打字敷衍我') === true);
+  check('识别：唱两句', wantsVoice('唱两句我听听') === true);
+  check('识别：普通聊天不算', wantsVoice('今天天气不错') === false);
+  check('识别：提到耳机不算', wantsVoice('我买了新耳机') === false);
+
+  // 模型侧也知道自己能发语音（要语音时返回 voiceWanted）
+  mock.setReplyResolver(() => '北风毫不留情，把叶子吹落。');
+  const asked = await petApi.chat('语音呢？打字敷衍我', { petId: 'main', surface: 'private', conv: 'private:20001' });
+  mock.setReplyResolver(null);
+  check('要语音时 chat 带上 voiceWanted', asked.voiceWanted === true, JSON.stringify(asked.segments));
+
+  // 合成不可用时必须退回文字（本机没装 edge-tts，正好走这条）
+  mock.setReplyResolver(() => '本鲸在呢。');
+  const before = sent.length;
+  const vBridge = createBridge({
+    conf: { ...conf, behavior: { ...conf.behavior, coalesceMs: 0, voice: { enabled: true, chance: 1, privateOnly: true } } },
+    personas,
+    transport,
+    log: quiet,
+  });
+  await vBridge.handleEvent(ev({ message_id: 'voice-fallback-1', message: [{ type: 'text', data: { text: '发个语音呗' } }] }));
+  mock.setReplyResolver(null);
+  const voiceOut = sent.slice(before);
+  const hasText = voiceOut.some((x) => x.segments.some((s) => s.type === 'text' && String(s.data.text).includes('本鲸在呢')));
+  const hasRecord = voiceOut.some((x) => x.segments.some((s) => s.type === 'record'));
+  check('语音合成失败时退回文字', hasText && !hasRecord, `text=${hasText} record=${hasRecord}`);
 }
 
 /* ----------------------------- 主动性（P1a）自测 ---------------------------- */

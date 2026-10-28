@@ -106,10 +106,16 @@ export async function synthesizeBuffer(text, opts = {}) {
   }
 }
 
-/** 是否该给这条消息配语音（概率 + 场景 + 开关） */
-export function shouldSpeak(conf = {}, { kind = 'private', rng = Math.random } = {}) {
+/**
+ * 是否该给这条消息配语音。
+ * @param {object} conf behavior.voice
+ * @param {{kind?:string, forced?:boolean, rng?:Function}} opts
+ *   forced = 主人明确要语音（「语音呢」「唱两句」）——不看概率，直接说。
+ */
+export function shouldSpeak(conf = {}, { kind = 'private', forced = false, rng = Math.random } = {}) {
   if (conf.enabled === false) return false;
   if (conf.privateOnly !== false && kind !== 'private') return false;
+  if (forced) return true;
   const chance = Number.isFinite(Number(conf.chance)) ? Number(conf.chance) : 0.15;
   return rng() < chance;
 }

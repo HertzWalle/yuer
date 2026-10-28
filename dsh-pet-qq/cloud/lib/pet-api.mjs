@@ -329,6 +329,21 @@ const INTERNAL_MARKS = [
   /^[ \t]*【(?:回复方式|规矩|你想起来的|你最近看到的|现在的心情|说话的人|这个会话里刚发过的图)】.*$/gmu,
 ];
 
+/**
+ * 主人是不是明确要语音（「发个语音」「语音呢」「唱两句」「念一下」）。
+ * 命中就绕过概率，直接把这条回复合成语音（且只发语音、不再发文字）。
+ */
+const VOICE_ASK =
+  /(发|来|整|说|念|读|唱)(一|两|几)?(个|段|句|首)?(语音|声音|音频)?(听听|给我听|呗|吧|嘛|呢|呀)?[。！!？?~～]*$|(语音|声音)(呢|吧|来|一下)|用(嘴|说的|声音)(说|回)|听听你(的)?声音|念一下|唱一?(段|句|首)|唱两句/u;
+
+export function wantsVoice(text = '') {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  // 只有「说/唱/念/语音」这类动词真的出现才算，避免「我买了新耳机」误判
+  if (!/[语音声]|唱|念|读出来|说出来/u.test(s)) return false;
+  return VOICE_ASK.test(s);
+}
+
 export function stripInternal(text = '') {
   let s = String(text ?? '');
   for (const re of INTERNAL_MARKS) s = s.replace(re, '');
@@ -344,7 +359,8 @@ const REPLY_STYLE = `
 【回复方式】像在 QQ 上跟人聊天：
 **默认一条说完**，需要分开时最多两条，每条都是一句完整的话（别把词拆开），也别一条里套三层意思；
 只有内容确实长（讲步骤、交代几件事）才用第三条，一般不超过三条，每条尽量 20 字以内。
-先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。`;
+先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。
+你能发语音：私聊里一句话（不超过 60 字）可以变成一条语音发出去；主人说「语音呢」「唱两句」「念一下」时，直接把那句说出来就行，**不要说自己只能打字、也别解释自己有没有语音功能**。群里不发语音。`;
 
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
@@ -663,9 +679,15 @@ export async function chat(
   await writeSay(petId, image ? { text: stored, image } : { text: stored });
   await noteChatter(kind, { image: Boolean(image) });
 
-  return image
-    ? { ok: true, text: stored, segments, image }
-    : { ok: true, text: stored, segments };
+  // 主人明确要语音时，桥会把这条回复直接合成语音（只发语音，不再发文字）
+  const voiceWanted = kind === 'private' && wantsVoice(input);
+  return {
+    ok: true,
+    text: stored,
+    segments,
+    ...(image ? { image } : {}),
+    ...(voiceWanted ? { voiceWanted: true } : {}),
+  };
 }
 
 /** 最近若干条记忆（桥的 /记忆 用；rounds 是条数，conv 决定桶） */

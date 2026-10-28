@@ -382,6 +382,13 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 - 发送节奏：第一条等 `typingDelayMs`（300ms），之后每条 `bubbleDelayMs`（700ms）+ 字数×22ms（≤600）+ 0~250ms 随机。
 - 记忆里存的是拼起来的一整段，下次读历史不会碎。
 
+### 语音（v1.14.0：只发语音，主人要就发）
+
+- 私聊里她偶尔会「说话」：`behavior.voice.chance`（默认 0.15）决定概率；**发语音就不发文字**，合成失败才退回文字。
+- 主人明确要语音（「语音呢」「唱两句」「念一下」「发个语音呗」）→ **绕过概率直接发语音**，模型也被要求不要声称自己只能打字。
+- 群里不发（`voice.privateOnly: true`）；音色 `zh-CN-XiaoyiNeural`，可换 `edge-tts --list-voices` 里任意一个。
+- 依赖：服务器 `edge-tts` + `ffmpeg`（见 `cloud/remote-deploy-v9.sh`）。
+
 ### 调参对照表（自己改这些，不用改代码）
 
 改完都执行 `sudo systemctl restart dsh-pet-bot`（`pet.json` 与 `bridge.config.json` 都是启动时读）。JSON 要保证格式正确，改坏了用 `sudo cp /opt/dsh-pet/data/pet.json.bak …` 回滚。
@@ -402,7 +409,7 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 | `behavior.followUpMinutes` | 12 | 群里被 @ 之后多久内不 @ 也算跟她说话，0=关 |
 | `behavior.maxBubbles` | 3 | 一次最多几条气泡（上限 4） |
 | `behavior.bubbleDelayMs` / `typingDelayMs` / `tailPauseMs` | 700 / 300 / 800 | 气泡之间的节奏 |
-| `behavior.voice.enabled` / `chance` / `privateOnly` / `voice` | true / 0.15 / true / `zh-CN-XiaoyiNeural` | 语音（Edge TTS，只在私聊、按概率） |
+| `behavior.voice.enabled` / `chance` / `privateOnly` / `voice` / `maxChars` | true / 0.15 / true / `zh-CN-XiaoyiNeural` / 60 | 语音（Edge TTS，只在私聊、按概率；主人点名要语音时无条件发） |
 | `behavior.observeGroups` | true | 群里旁听（false=完全不参与群聊） |
 | `proactive.ownerIds` | `["1360153202"]` | 谁能用指令 |
 
