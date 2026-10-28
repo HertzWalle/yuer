@@ -135,3 +135,49 @@ export async function draftGroupMessage({ ctx, now = new Date(), buffer = [], po
   const { text, image } = extractChatImage(say, pool);
   return image ? { ok: true, think, say: text, image } : { ok: true, think, say: text };
 }
+const OPENER_RULES = [
+  '要求：',
+  '- 群里已经安静好一阵了，你主动起个话头，或者吐槽一句自己的事（顺手、随便，不要像开场白）；',
+  '- **不要 @ 任何人**，不要问「在吗」「有人吗」，不要总结上一条对话；',
+  '- 1 条，最多 2 条短句，每条 20 字以内；不要 Markdown、不要客套；',
+  '- 可以聊你现在在做什么、刚看到的东西、这个点该干嘛；',
+  '- 如果实在没什么可说的，把 say 写成 "SKIP"。',
+  '',
+  '只回一个 JSON：{"think": "<20~40 字内心独白>", "say": "<要发的话>"}',
+].join('\n');
+
+/**
+ * 冷清群的主动开场：没人理她，她自己起个话头。
+ * 和插话的区别是没有「别人刚说的话」可接，所以给的背景是「最近群里聊过什么 + 你最近看到什么」。
+ * @returns {Promise<{ok: true, think: string, say: string, image?: string} | {ok: false, reason: string, message?: string}>}
+ */
+export async function draftOpener({ ctx, now = new Date(), buffer = [], pool = [], mood = '', seen = '' }) {
+  const system = [
+    baseSystem(ctx, now),
+    '',
+    '【群里现在很安静，你想自己起个话头。】',
+    mood ? `你此刻的状态：${mood}。` : '',
+    seen ? `你最近看到的：${seen}` : '',
+    pool.length ? imageInstruction(pool) : '',
+    '',
+    OPENER_RULES,
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const recent = buffer.length ? `最近群里聊过：\n${transcriptOf(buffer, 6)}\n\n` : '这个群最近一直很安静。\n\n';
+  const msgs = [
+    { role: 'system', content: system },
+    { role: 'user', content: `${recent}你要说什么？` },
+  ];
+
+  const res = await chatCompletion(msgs, { temperature: 1, maxTokens: 160 });
+  if (!res.ok) return { ok: false, reason: res.reason, message: res.message };
+
+  const { think, say } = parseThinkSay(res.text);
+  if (!say || /^skip$/i.test(say.replace(/["'。！!]/g, '').trim())) {
+    return { ok: false, reason: 'self-skip', message: think || 'SKIP' };
+  }
+  const { text, image } = extractChatImage(say, pool);
+  return image ? { ok: true, think, say: text, image } : { ok: true, think, say: text };
+}

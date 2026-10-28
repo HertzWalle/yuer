@@ -959,16 +959,22 @@ async function testAgency() {
     );
   }
 
-  // 13.2 冲动攒够 + 评分过关 → 自己插一句（不带 @）
+  // 13.2 热闹群 + 机会分够 + 评分过关 → 自己插一句（不带 @）
   {
     const db = await groupsMod.loadGroups(fakeNow);
     const g = groupsMod.groupState(db, 'group:9001', fakeNow);
+    const now = fakeNow.getTime();
     g.impulse = 130;
-    g.lastMessageAt = fakeNow.getTime();
-    g.lastDecayAt = fakeNow.getTime();
+    g.lastMessageAt = now;
+    g.lastDecayAt = now;
     g.sentToday = 0;
     g.lastSpokeAt = 0;
     g.cooldownUntil = 0;
+    // 5 分钟内 40 条 → 8 条/分 → 热闹档
+    g.msgs = Array.from({ length: 40 }, (_, i) => now - i * 5_000);
+    g.tier = 'hot';
+    g.tierSince = now - 10 * 60_000;
+    g.lastUrgency = 15;
     await groupsMod.saveGroups(db);
   }
   n = sent.length;
@@ -1007,6 +1013,83 @@ async function testAgency() {
       sent.length === n && Number(g.cooldownUntil) > fakeNow.getTime() && Number(g.impulse) === 0,
       `annoyance=${Math.round(g.annoyance)}，冷却到 ${new Date(Number(g.cooldownUntil)).toLocaleString('zh-CN')}`,
     );
+  }
+
+  // 13.6 活跃度分档：热闹 100 / 冷清 12 / 死寂 3
+  {
+    const mk = (per5min, now) => {
+      const g = { msgs: [], tier: '', tierSince: 0, spokeLog: [], annoyance: 0, sentToday: 0 };
+      const arr = [];
+      for (let i = 0; i < per5min; i += 1) arr.push(now - i * 10_000);
+      g.msgs = arr;
+      return g;
+    };
+    const now = fakeNow.getTime();
+    const qHot = groupsMod.quotaOf(mk(50, now), fakeNow, groupsMod.GROUP_DEFAULTS);
+    const qQuiet = groupsMod.quotaOf(mk(3, now), fakeNow, groupsMod.GROUP_DEFAULTS);
+    const qDead = groupsMod.quotaOf(mk(0, now), fakeNow, groupsMod.GROUP_DEFAULTS);
+    check('热闹群每天上限 100', qHot.tier === 'hot' && qHot.daily === 100, `${qHot.tier}/${qHot.daily}`);
+    check('冷清群每天上限 12', qQuiet.tier === 'quiet' && qQuiet.daily === 12, `${qQuiet.tier}/${qQuiet.daily}`);
+    check('死寂群每天上限 3', qDead.tier === 'dead' && qDead.daily === 3, `${qDead.tier}/${qDead.daily}`);
+  }
+
+  // 13.7 到配额就闭嘴（100 条打满）
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9100', fakeNow);
+    const now = fakeNow.getTime();
+    g.msgs = Array.from({ length: 40 }, (_, i) => now - i * 5_000);
+    g.tier = 'hot';
+    g.tierSince = now - 10 * 60_000;
+    g.lastUrgency = 20;
+    g.sentToday = 100;
+    g.lastSpokeAt = now - 10 * 60_000;
+    const gate = groupsMod.canSpeakGroup(db, 'group:9100', { now: fakeNow, quiet: {}, opts: groupsMod.GROUP_DEFAULTS });
+    check('配额打满就不再说话', gate.ok === false && gate.reason === 'daily-limit', gate.reason);
+  }
+
+  // 13.8 占群比：一小时内她说的话不超过群消息的 12%
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9101', fakeNow);
+    const now = fakeNow.getTime();
+    g.msgs = Array.from({ length: 20 }, (_, i) => now - i * 20_000);
+    g.tier = 'hot';
+    g.tierSince = now - 10 * 60_000;
+    g.lastUrgency = 20;
+    g.spokeLog = [{ at: now - 5 * 60_000, replied: true }, { at: now - 3 * 60_000, replied: true }];
+    g.sentToday = 2;
+    g.lastSpokeAt = now - 3 * 60_000;
+    const gate = groupsMod.canSpeakGroup(db, 'group:9101', { now: fakeNow, quiet: {}, opts: groupsMod.GROUP_DEFAULTS });
+    check('占群比到线就收手', gate.ok === false && gate.reason === 'share-cap', gate.reason);
+  }
+
+  // 13.9 冷清群安静 45 分钟 → 允许主动开场
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9102', fakeNow);
+    const now = fakeNow.getTime();
+    g.msgs = [now - 50 * 60_000];
+    g.tier = 'dead';
+    g.tierSince = now - 60 * 60_000;
+    g.lastMessageAt = now - 50 * 60_000;
+    g.lastSpokeAt = now - 3 * 3600_000;
+    g.sentToday = 0;
+    const can = groupsMod.canOpenGroup(db, 'group:9102', { now: fakeNow, quiet: {}, opts: groupsMod.GROUP_DEFAULTS, roll: () => 0 });
+    check('冷清群安静够久可以主动开场', can.ok === true, `${can.reason}/${can.tier}`);
+  }
+
+  // 13.10 热闹群不许主动开场
+  {
+    const db = await groupsMod.loadGroups(fakeNow);
+    const g = groupsMod.groupState(db, 'group:9103', fakeNow);
+    const now = fakeNow.getTime();
+    g.msgs = Array.from({ length: 40 }, (_, i) => now - i * 5_000);
+    g.tier = 'hot';
+    g.tierSince = now - 10 * 60_000;
+    g.lastMessageAt = now;
+    const can = groupsMod.canOpenGroup(db, 'group:9103', { now: fakeNow, quiet: {}, opts: groupsMod.GROUP_DEFAULTS, roll: () => 0 });
+    check('热闹群不主动开场', can.ok === false && can.reason === 'too-lively', can.reason);
   }
 
   // 13.5 静默时段不插话

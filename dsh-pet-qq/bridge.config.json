@@ -53,7 +53,45 @@
       "perMessage": 2,
       "mentionBonus": 20,
       "topicBonus": 15,
-      "positiveBonus": 5
+      "positiveBonus": 5,
+      "activity": {
+        "windowSec": 300,
+        "upHoldSec": 180,
+        "downHoldSec": 900,
+        "hotPerMin": 6,
+        "normalPerMin": 1.2,
+        "quietPerMin": 0.2
+      },
+      "dailyLimit": {
+        "hot": 100,
+        "normal": 40,
+        "quiet": 12,
+        "dead": 3
+      },
+      "hourLimit": {
+        "hot": 15,
+        "normal": 8,
+        "quiet": 2,
+        "dead": 1
+      },
+      "minGapSec": {
+        "hot": 90,
+        "normal": 300,
+        "quiet": 1800,
+        "dead": 7200
+      },
+      "urgencyMin": {
+        "hot": 9,
+        "normal": 11,
+        "quiet": 14,
+        "dead": 18
+      },
+      "shareCap": 0.12,
+      "idleOpenMin": 45,
+      "openerPerHour": {
+        "quiet": 0.5,
+        "dead": 0.25
+      }
     }
   },
   "groupWhitelist": [],

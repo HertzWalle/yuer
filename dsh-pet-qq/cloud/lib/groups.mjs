@@ -16,6 +16,29 @@
 import { PATHS, readJson, writeJson } from './store.mjs';
 
 export const GROUP_DEFAULTS = {
+  /* ---------- 按活跃度分档（v1.10.0）：热闹的群多说话，冷清的群偶尔开口 ---------- */
+
+  /** 判活跃度用的滑动窗口（秒）与分档阈值（条/分钟） */
+  activity: { windowSec: 300, upHoldSec: 180, downHoldSec: 900, hotPerMin: 6, normalPerMin: 1.2, quietPerMin: 0.2 },
+  /** 每个群每天最多说多少条（热闹群上限 100，用户指定） */
+  dailyLimit: { hot: 100, normal: 40, quiet: 12, dead: 3 },
+  /** 每小时上限，防止一口气刷完 */
+  hourLimit: { hot: 15, normal: 8, quiet: 2, dead: 1 },
+  /** 两次开口的最小间隔（秒） */
+  minGapSec: { hot: 90, normal: 300, quiet: 1800, dead: 7200 },
+  /** 机会分要到多少才值得开口（热闹档机会多、门槛低；死寂档只在真好聊时开口） */
+  urgencyMin: { hot: 9, normal: 11, quiet: 14, dead: 18 },
+  /** 她的话在同一小时内不超过群消息量的这个比例（防刷屏） */
+  shareCap: 0.12,
+  /** 群里安静多久算「冷清到可以主动开场」 */
+  idleOpenMin: 45,
+  /** 冷清群每小时主动开场的概率 */
+  openerPerHour: { quiet: 0.5, dead: 0.25 },
+  /** 回声率（她说话后 10 分钟内有人接的比例）对配额的影响 */
+  echoBoost: 1.2,
+  echoPenalty: 0.7,
+
+  /* ---------- 旧参数：保留给冲动模型与兼容旧配置 ---------- */
   /** 群里的冲动攒得比私聊慢：私聊 6/h，群聊 3/h */
   ratePerHour: 3,
   /** 群里开口的门槛更高（私聊 70） */
@@ -65,7 +88,121 @@ function blankGroup() {
     afterSpeak: { at: 0, count: 0 },
     /** 今天已经说过的话题，避免反复提同一件事 */
     said: [],
+    /** 最近 60 分钟的消息时间戳（判活跃度 + 占群比用） */
+    msgs: [],
+    /** 当前活跃档位：hot / normal / quiet / dead，以及换档时间（迟滞用） */
+    tier: '',
+    tierSince: 0,
+    /** 最近开口记录：{ at, replied } —— 回声率就是看这上面 replied 的比例 */
+    spokeLog: [],
+    /** 最近一次机会分（/心思 里显示，便于调参） */
+    lastUrgency: 0,
   };
+}
+
+/** 档位排序：数字大 = 更热闹 */
+const TIER_RANK = { dead: 0, quiet: 1, normal: 2, hot: 3 };
+export const TIERS = ['dead', 'quiet', 'normal', 'hot'];
+
+/** 记一条群消息的时间（判活跃度用），顺手把超过 1 小时的清掉 */
+export function noteActivity(g, now = new Date()) {
+  const ts = Number(now.getTime?.() ?? now) || Date.now();
+  const arr = Array.isArray(g.msgs) ? g.msgs : [];
+  arr.push(ts);
+  const cutoff = ts - 60 * 60_000;
+  g.msgs = arr.filter((x) => Number(x) >= cutoff).slice(-600);
+  return g;
+}
+
+/** 最近 windowSec 秒的条/分钟 */
+export function activityRate(g, now = new Date(), opts = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const a = o.activity ?? GROUP_DEFAULTS.activity;
+  const ts = Number(now.getTime?.() ?? now) || Date.now();
+  const win = Number(a.windowSec) * 1000;
+  const n = (g.msgs || []).filter((x) => ts - Number(x) <= win).length;
+  return n / (Number(a.windowSec) / 60);
+}
+
+/**
+ * 当前应该算什么档位。带迟滞：
+ * - 往上升要「明显超过阈值」并且停够 upHoldSec，避免一热闹就狂说；
+ * - 往下降要持续 downHoldSec，避免刚安静两分钟就装死。
+ */
+export function tierOf(g, now = new Date(), opts = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const a = o.activity ?? GROUP_DEFAULTS.activity;
+  const ts = Number(now.getTime?.() ?? now) || Date.now();
+  const rate = activityRate(g, now, o);
+  const desired =
+    rate >= Number(a.hotPerMin) ? 'hot' : rate >= Number(a.normalPerMin) ? 'normal' : rate >= Number(a.quietPerMin) ? 'quiet' : 'dead';
+  const cur = g.tier && TIER_RANK[g.tier] !== undefined ? g.tier : '';
+  if (!cur) {
+    g.tier = desired;
+    g.tierSince = ts;
+    return desired;
+  }
+  const since = ts - Number(g.tierSince || 0);
+  if (TIER_RANK[desired] > TIER_RANK[cur]) {
+    const margin = desired === 'hot' ? Number(a.hotPerMin) * 1.25 : 1;
+    if (rate >= margin && since >= Number(a.upHoldSec) * 1000) {
+      g.tier = desired;
+      g.tierSince = ts;
+    }
+  } else if (TIER_RANK[desired] < TIER_RANK[cur] && since >= Number(a.downHoldSec) * 1000) {
+    g.tier = desired;
+    g.tierSince = ts;
+  }
+  return g.tier || desired;
+}
+
+/** 回声率：最近 10 次开口里，有多少次 10 分钟内被人接住（没记录时按 0.5 处理） */
+export function echoRateOf(g, now = new Date()) {
+  const ts = Number(now.getTime?.() ?? now) || Date.now();
+  const log = (g.spokeLog || []).filter((x) => ts - Number(x.at || 0) <= 24 * 3_600_000).slice(-10);
+  if (!log.length) return 0.5;
+  return log.filter((x) => x.replied).length / log.length;
+}
+
+/**
+ * 今天的配额。日上限是硬的（用户指定：热闹群最多 100 条/天），
+ * 回声率只调节**节奏**（每小时能说几句），不越过年上限。
+ */
+export function quotaOf(g, now = new Date(), opts = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const tier = tierOf(g, now, o);
+  const daily = Math.max(1, Number((o.dailyLimit ?? GROUP_DEFAULTS.dailyLimit)[tier] ?? 3));
+  const hourBase = Math.max(1, Number((o.hourLimit ?? GROUP_DEFAULTS.hourLimit)[tier] ?? 1));
+  const echo = echoRateOf(g, now);
+  const factor = echo >= 0.5 ? Number(o.echoBoost) : echo <= 0.2 ? Number(o.echoPenalty) : 1;
+  return { tier, daily, hourly: Math.min(hourBase, Math.max(1, Math.round(hourBase * factor))), echo };
+}
+
+/** 最近一小时的开口次数与群消息条数（算占群比） */
+function lastHour(g, now, opts = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const ts = Number(now.getTime?.() ?? now) || Date.now();
+  const spoke = (g.spokeLog || []).filter((x) => ts - Number(x.at || 0) <= 3_600_000).length;
+  const msgs = (g.msgs || []).filter((x) => ts - Number(x) <= 3_600_000).length;
+  return { spoke, msgs, cap: Number(o.shareCap) };
+}
+
+/**
+ * 机会分：这条消息值不值得开口。
+ * 只是「值不值」的排序依据，真正的闸门仍然在 canSpeakGroup 里。
+ */
+export function urgencyOf(g, { atBot = false, scored = {}, now = new Date(), opts = {} } = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const tier = tierOf(g, now, o);
+  const reasons = scored.reasons || [];
+  let u = 5;
+  if (atBot || reasons.includes('mention')) u += 20;
+  if (reasons.some((r) => r.startsWith('topic'))) u += 6;
+  if (reasons.includes('positive')) u += 2;
+  if (g.lastSpokeAt && now.getTime() - Number(g.lastSpokeAt) < 10 * 60_000) u += 6; // 她刚说完、话头还在
+  u -= Number(g.annoyance || 0) * 0.15;
+  g.lastUrgency = Math.max(0, Math.round(u));
+  return { urgency: g.lastUrgency, tier, need: Number((o.urgencyMin ?? GROUP_DEFAULTS.urgencyMin)[tier] ?? 11) };
 }
 
 export async function loadGroups(now = new Date()) {
@@ -136,6 +273,13 @@ export function noteGroupMessage(db, { conv, text, atBot = false, now = new Date
   const g = groupState(db, conv, now);
   const prevMsgAt = Number(g.lastMessageAt || 0);
   g.lastMessageAt = now.getTime();
+  noteActivity(g, now);
+
+  // 她刚才说完、10 分钟内有人接话 → 记一次「回声」，用来判断她在群里说得好不好使
+  const lastSpoke = (g.spokeLog || [])[(g.spokeLog || []).length - 1];
+  if (lastSpoke && !lastSpoke.replied && !atBot && now.getTime() - Number(lastSpoke.at || 0) <= 10 * 60_000) {
+    lastSpoke.replied = true;
+  }
 
   // 上次冒泡之后，别人又说了几句（超过 3 分钟、且已经有 2 句以上 → 说明没人接她的茬）
   if (g.afterSpeak?.at && now.getTime() - g.afterSpeak.at < 10 * 60_000 && !atBot) {
@@ -167,7 +311,7 @@ export function noteGroupMessage(db, { conv, text, atBot = false, now = new Date
   g.impulse = Math.min(150, Number(g.impulse || 0) + gain);
   g.lastDecayAt = now.getTime();
   void prevMsgAt;
-  return { gain, reasons, annoyance: g.annoyance };
+  return { gain, reasons, annoyance: g.annoyance, tier: tierOf(g, now, o), urgency: Number(g.lastUrgency || 0) };
 }
 
 /**
@@ -177,18 +321,44 @@ export function noteGroupMessage(db, { conv, text, atBot = false, now = new Date
 export function canSpeakGroup(db, conv, { now = new Date(), quiet = {}, sinceLastInboundMs = null, opts = {} } = {}) {
   const o = { ...GROUP_DEFAULTS, ...opts };
   const g = groupState(db, conv, now);
+  const q = quotaOf(g, now, o);
+  const gap = Number((o.minGapSec ?? GROUP_DEFAULTS.minGapSec)[q.tier] ?? 300) * 1000;
+  const hour = lastHour(g, now, o);
 
-  if (Number(g.cooldownUntil || 0) > now.getTime()) return { ok: false, reason: 'cooldown', g };
-  if (inQuiet(now, quiet)) return { ok: false, reason: 'quiet-hours', g };
-  if (Number(g.impulse || 0) < Number(o.threshold)) return { ok: false, reason: 'impulse-low', g };
-  if (Number(g.sentToday || 0) >= Number(o.dailyPerGroup)) return { ok: false, reason: 'daily-limit', g };
-  if (g.lastSpokeAt && now.getTime() - Number(g.lastSpokeAt) < Number(o.minGapHours) * 3_600_000) {
-    return { ok: false, reason: 'min-gap', g };
-  }
-  if (Number(g.annoyance || 0) >= 60) return { ok: false, reason: 'annoyed', g };
+  const deny = (reason) => ({ ok: false, reason, g, tier: q.tier, quota: q, hour, gapSec: Math.round(gap / 1000) });
+
+  if (Number(g.cooldownUntil || 0) > now.getTime()) return deny('cooldown');
+  if (inQuiet(now, quiet)) return deny('quiet-hours');
+  if (Number(g.annoyance || 0) >= 60) return deny('annoyed');
+  if (Number(g.sentToday || 0) >= q.daily) return deny('daily-limit');
+  if (hour.spoke >= q.hourly) return deny('hour-limit');
+  if (g.lastSpokeAt && now.getTime() - Number(g.lastSpokeAt) < gap) return deny('min-gap');
+  // 占群比：她一小时内说的话不能超过群消息量的 shareCap（群里冷清时再放宽到至少 1 条）
+  if (hour.msgs >= 8 && hour.spoke >= Math.max(1, Math.floor(hour.msgs * Number(o.shareCap)))) return deny('share-cap');
+  // 机会分不够：热闹的群 9 分，死寂的群 18 分
+  if (Number(g.lastUrgency || 0) < Number((o.urgencyMin ?? GROUP_DEFAULTS.urgencyMin)[q.tier] ?? 11)) return deny('low-urgency');
   // 群里刚被 @ 过、她已经在说话，就别再自己插话（避免同一分钟两条）
-  if (sinceLastInboundMs !== null && sinceLastInboundMs < 60_000) return { ok: false, reason: 'just-replied', g };
-  return { ok: true, reason: 'ok', g };
+  if (sinceLastInboundMs !== null && sinceLastInboundMs < 60_000) return deny('just-replied');
+  return { ok: true, reason: 'ok', g, tier: q.tier, quota: q, hour, gapSec: Math.round(gap / 1000) };
+}
+
+/** 主动开场（冷清群用）：只看「够不够安静 / 配额 / 间隔 / 概率」，不看机会分 */
+export function canOpenGroup(db, conv, { now = new Date(), quiet = {}, opts = {}, roll = Math.random } = {}) {
+  const o = { ...GROUP_DEFAULTS, ...opts };
+  const g = groupState(db, conv, now);
+  const q = quotaOf(g, now, o);
+  if (q.tier !== 'quiet' && q.tier !== 'dead') return { ok: false, reason: 'too-lively', tier: q.tier };
+  if (Number(g.cooldownUntil || 0) > now.getTime()) return { ok: false, reason: 'cooldown', tier: q.tier };
+  if (inQuiet(now, quiet)) return { ok: false, reason: 'quiet-hours', tier: q.tier };
+  if (Number(g.annoyance || 0) >= 40) return { ok: false, reason: 'annoyed', tier: q.tier };
+  if (Number(g.sentToday || 0) >= q.daily) return { ok: false, reason: 'daily-limit', tier: q.tier };
+  const idleMs = Number(o.idleOpenMin) * 60_000;
+  if (!g.lastMessageAt || now.getTime() - Number(g.lastMessageAt) < idleMs) return { ok: false, reason: 'too-recent', tier: q.tier };
+  const gap = Number((o.minGapSec ?? GROUP_DEFAULTS.minGapSec)[q.tier] ?? 1800) * 1000;
+  if (g.lastSpokeAt && now.getTime() - Number(g.lastSpokeAt) < gap) return { ok: false, reason: 'min-gap', tier: q.tier };
+  const p = Number((o.openerPerHour ?? GROUP_DEFAULTS.openerPerHour)[q.tier] ?? 0);
+  if (roll() >= p) return { ok: false, reason: 'coin', tier: q.tier };
+  return { ok: true, reason: 'ok', g, tier: q.tier, quota: q };
 }
 
 function inQuiet(now, quiet) {
@@ -211,6 +381,7 @@ export function markGroupSpoke(db, conv, { now = new Date(), text = '', opts = {
   g.lastSpokeAt = now.getTime();
   g.afterSpeak = { at: now.getTime(), count: 0 };
   g.said = [...(g.said || []).slice(-9), String(text).slice(0, 40)];
+  g.spokeLog = [...(g.spokeLog || []).slice(-19), { at: now.getTime(), replied: false }];
   return g;
 }
 

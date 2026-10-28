@@ -32,23 +32,28 @@ import {
 import { dueSoon, extractCommitments, humanTime, loadCommitments, markStatus, openItems } from './commitments.mjs';
 import { generateCommitmentMessage, generateMood, generateProactive, moodWord } from './proactive.mjs';
 import { cleanMood, publishMood, readFeed } from './qzone.mjs';
-import { addNote, decayAndArchive, recentNotes } from './semantic.mjs';
+import { addNote, decayAndArchive, recentNotes, seenBrief } from './semantic.mjs';
 import { biliNote, douyinNote, fetchSeen } from './feeds.mjs';
 import { loadSelf, updateSelf } from './memory-manager.mjs';
 import { chatCompletion } from './llm.mjs';
 import {
   GROUP_DEFAULTS,
   applyAnnoyanceCooldown,
+  canOpenGroup,
   canSpeakGroup,
   decayGroup,
+  echoRateOf,
   groupState,
   loadGroups,
   markGroupSpoke,
   noteGroupMessage,
+  quotaOf,
   saveGroups,
   settleAfterSpeak,
+  tierOf,
+  urgencyOf,
 } from './groups.mjs';
-import { draftGroupMessage, scoreChatter } from './group-chat.mjs';
+import { draftGroupMessage, draftOpener, scoreChatter } from './group-chat.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -310,8 +315,13 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     const db = await loadGroups(t);
     const words = await topicKeywords(t);
     const info = noteGroupMessage(db, { conv, text, atBot, now: t, keywords: words, opts: g });
-    const cooldown = applyAnnoyanceCooldown(groupState(db, conv, t), t);
+    const st = groupState(db, conv, t);
+    const u = urgencyOf(st, { atBot, scored: info, now: t, opts: g });
+    const cooldown = applyAnnoyanceCooldown(st, t);
     await saveGroups(db);
+    if (u.urgency >= u.need) {
+      await trace({ kind: 'group-urgency', conv, tier: u.tier, urgency: u.urgency, need: u.need, reasons: info.reasons });
+    }
     if (cooldown) {
       log.info(`群 ${gid} 反感度 ${Math.round(info.annoyance)}，冷却 ${cooldown}`);
       await trace({ kind: 'group-cooldown', conv, hours: cooldown, annoyance: Math.round(info.annoyance) });
@@ -348,7 +358,17 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
 
       const gate = canSpeakGroup(db, conv, { now: t, quiet, opts: g });
       if (!gate.ok) {
-        await trace({ kind: 'group-gate', conv, reason: gate.reason, impulse: Math.round(st.impulse), annoyance: Math.round(st.annoyance) });
+        await trace({
+          kind: 'group-gate',
+          conv,
+          reason: gate.reason,
+          tier: gate.tier,
+          urgency: Math.round(st.lastUrgency || 0),
+          today: Number(st.sentToday || 0),
+          quota: gate.quota?.daily,
+          impulse: Math.round(st.impulse),
+          annoyance: Math.round(st.annoyance),
+        });
         continue;
       }
 
@@ -358,10 +378,11 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
         await trace({ kind: 'group-score-error', conv, reason: score.reason, message: score.message });
         continue;
       }
-      if (score.score < Number(g.scoreMin)) {
-        // 场合不对：扣一点冲动，别让同一个 tick 反复问
+      // 热闹的群机会多，评分门槛放低一点；冷清群宁可不说
+      const scoreMin = gate.tier === 'hot' ? 5 : Number(g.scoreMin);
+      if (score.score < scoreMin) {
         st.impulse = Math.max(0, Number(st.impulse || 0) - 30);
-        await trace({ kind: 'group-skip', conv, score: score.score, why: score.why, impulse: Math.round(st.impulse) });
+        await trace({ kind: 'group-skip', conv, tier: gate.tier, score: score.score, need: scoreMin, why: score.why, impulse: Math.round(st.impulse) });
         continue;
       }
 
@@ -382,6 +403,8 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
       await trace({
         kind: 'group-proactive',
         conv,
+        tier: gate.tier,
+        urgency: Math.round(st.lastUrgency || 0),
         impulse: Math.round(level),
         score: score.score,
         why: score.why,
@@ -398,8 +421,53 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     await saveGroups(db);
   }
 
+  /**
+   * 冷清群的主动开场：群里安静久了，她自己起个话头（热闹群不走这条路）。
+   * 只按概率触发，且必须配额、间隔、反感度都放行。
+   */
+  async function runOpeners(agency, t, dry) {
+    if (g.enabled === false) return;
+    const db = await loadGroups(t);
+    const convs = Object.keys(db.groups);
+    if (!convs.length) return;
+    const seen = await seenBrief({ n: 3 });
+
+    for (const conv of convs) {
+      const gate = canOpenGroup(db, conv, { now: t, quiet, opts: g });
+      if (!gate.ok) {
+        if (gate.reason === 'daily-limit' || gate.reason === 'cooldown' || gate.reason === 'annoyed') {
+          await trace({ kind: 'group-opener-gate', conv, reason: gate.reason, tier: gate.tier });
+        }
+        continue;
+      }
+
+      const ctx = await personaFor('group', conv);
+      const draft = await draftOpener({
+        ctx,
+        now: t,
+        buffer: buffers.get(conv) || [],
+        pool: await memePool(),
+        mood: moodWord(agency.mood),
+        seen: seen || '',
+      });
+      if (!draft.ok) {
+        await trace({ kind: 'group-opener-skip', conv, tier: gate.tier, reason: draft.reason, think: draft.message });
+        continue;
+      }
+
+      const ok = await deliver(conv, { text: draft.say, image: draft.image }, { dry });
+      await trace({ kind: 'group-opener', conv, tier: gate.tier, think: draft.think, say: draft.say, sent: Boolean(ok) });
+      if (ok) {
+        markGroupSpoke(db, conv, { now: t, text: draft.say, opts: g });
+        log.info(`群里主动开个话头（${conv}，${gate.tier}）：${String(draft.say).slice(0, 80)}`);
+      }
+    }
+    await saveGroups(db);
+  }
   /** /心思 里的群聊那段 */
-  async function groupLines(t) {    const db = await loadGroups(t);
+  const TIER_LABEL = { hot: '热闹', normal: '正常', quiet: '冷清', dead: '死寂' };
+  async function groupLines(t) {
+    const db = await loadGroups(t);
     const rows = Object.entries(db.groups)
       .filter(([, v]) => v && Number(v.lastMessageAt || 0) > 0)
       .sort((a, b) => Number(b[1].lastMessageAt) - Number(a[1].lastMessageAt))
@@ -407,9 +475,11 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     if (!rows.length) return [];
     return rows.map(([conv, v]) => {
       const gid = conv.slice('group:'.length);
+      const tier = tierOf(v, t, g);
+      const q = quotaOf(v, t, g);
       const cool = Number(v.cooldownUntil || 0) > t.getTime() ? `，冷却到 ${clock(new Date(v.cooldownUntil))}` : '';
       const spoke = v.lastSpokeAt ? `，上次开口 ${clock(new Date(v.lastSpokeAt))}` : '';
-      return `群 ${gid}：冲动 ${Math.round(v.impulse || 0)}/${g.threshold}，反感 ${Math.round(v.annoyance || 0)}${cool}${spoke}，今天 ${Number(v.sentToday || 0)}/${g.dailyPerGroup}`;
+      return `群 ${gid}：${TIER_LABEL[tier] || tier}（今天 ${Number(v.sentToday || 0)}/${q.daily}，机会分 ${Math.round(v.lastUrgency || 0)}，回声 ${Math.round(echoRateOf(v, t) * 100)}%，反感 ${Math.round(v.annoyance || 0)}${cool}${spoke}）`;
     });
   }
 
@@ -675,7 +745,10 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
       await runCommitments(agency, t, dry);
       await runImpulse(agency, t, dry);
       // 群聊独立算账：私聊被暂停/静默不影响群，反之亦然
-      if (!inQuietHours(t, quiet)) await runGroups(agency, t, dry);
+      if (!inQuietHours(t, quiet)) {
+        await runGroups(agency, t, dry);
+        await runOpeners(agency, t, dry);
+      }
       // 空间也独立：读动态按 readHour，发说说自己看阈值/静默/dryRun
       await runQzone(agency, t, dry);
       // 自己刷 B 站/抖音（只读，进语义记忆），到配置的小时才动
