@@ -36,6 +36,7 @@ import { addNote, decayAndArchive, recentNotes, seenBrief } from './semantic.mjs
 import { biliNote, douyinNote, fetchSeen } from './feeds.mjs';
 import { loadSelf, updateSelf } from './memory-manager.mjs';
 import { chatCompletion } from './llm.mjs';
+import { isSkipReply, lettaWake, lettaTrial, splitLettaReply } from './letta.mjs';
 import {
   GROUP_DEFAULTS,
   applyAnnoyanceCooldown,
@@ -69,6 +70,7 @@ const DEFAULTS = {
   ratePerHour: 9,
   recentBonus: 3,
   dailyLimit: 8,
+  viaLetta: true,
   minGapMin: 35,
   recentGuardMin: 20,
   commitmentLeadMin: 20,
@@ -234,6 +236,48 @@ export function createScheduler({ conf, log, now = () => new Date() }) {
     const pool = await memePool();
     const lastUser = [...history].reverse().find((m) => m?.role === 'user');
     const hint = lastUser ? `最近主人说过：「${String(lastUser.content).slice(0, 60)}」` : '';
+
+    // P2：把「为什么现在想说」讲给她自己（Letta），说不说由她定；她没上线就回落原来的主动大脑，
+    // 「还会主动找你」这件事不能因为换了大脑就消失。
+    const trial = p.viaLetta === false ? null : lettaTrial(conf?.behavior?.letta, ownerConv);
+    if (trial) {
+      const got = await lettaWake(
+        trial,
+        { reason: `冲动攒到 ${Math.round(impulse)}，阈值 ${threshold}`, hint, mood: moodWord(agency.mood) },
+        { log },
+      );
+      if (!got) {
+        log.warn('Letta 没醒，这次主动消息回落原来的大脑');
+      } else if (got.skip) {
+        agency.impulse.owner = Math.max(0, impulse - 25);
+        await trace({ kind: 'self-skip', via: 'letta', impulse: Math.round(impulse) });
+        return;
+      } else {
+        const segments = splitLettaReply(got.reply, Math.max(1, Number(trial.maxSegments) || 3));
+        const say = segments.join('\n');
+        const ok = await deliver(ownerConv, { text: say, segments }, { dry });
+        await trace({
+          kind: 'proactive',
+          via: 'letta',
+          conv: ownerConv,
+          impulse: Math.round(impulse),
+          threshold,
+          mood: agency.mood,
+          say,
+          sent: ok,
+        });
+        if (ok) {
+          agency.impulse.owner = Math.max(0, impulse - Number(p.impulseCost));
+          agency.counters.ownerSent = Number(agency.counters.ownerSent || 0) + 1;
+          agency.lastProactiveAt = t.getTime();
+          agency.awaiting = { at: t.getTime(), conv: ownerConv, text: say };
+          log.info(
+            `主动开口（Letta，冲动 ${Math.round(impulse)} → ${Math.round(agency.impulse.owner)}）：${say.slice(0, 80)}`,
+          );
+        }
+        return;
+      }
+    }
 
     const res = await generateProactive({ pet: ctx, now: t, history, mood: agency.mood, pool, hint });
     if (!res.ok) {

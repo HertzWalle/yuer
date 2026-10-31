@@ -3,7 +3,7 @@
 给 `dsh-pet`（DeepSeek Harness 的桌宠插件）加上**人格**，再通过 **QQ** 跟她聊天：
 桌面气泡、私聊、群聊共用同一套人设与记忆；云端可以独立跑，本机关机也不影响。
 
-> 当前版本 **v1.14.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
+> 当前版本 **v1.15.0**（`VERSION`） · 变更记录 `CHANGELOG.md` · 后续计划 `docs/ROADMAP.md`
 
 ## 她现在能做什么
 
@@ -18,6 +18,7 @@
 | 自己的输入 | 每天刷两次 B 站热门与抖音热搜，写进语义记忆，聊天时自然提起 |
 | 可换接入层 | `POST /turn` 契约 + AstrBot 参考适配器，换框架不换脑子 |
 | 云端常驻 | 腾讯云 2C2G 上跑 NapCat + 大脑，本机可关机 |
+| 可换大脑 | 试运行中：私聊/指定群可交给本机 **Letta**（她自己改写人格与记忆），失败自动回落 |
 
 ## 目录
 
@@ -31,7 +32,10 @@
 │   ├── napcat/          # NapCat 启动脚本（shell 目录不入库）
 │   └── docs/            # 云端架构与迁移说明
 ├── persona-dafeiyu/     # DSH 人格卡（可导入 dsh-persona-dafeiyu）+ 提示词分析
-├── docs/ROADMAP.md      # S0–S5 版本规划
+├── docs/ROADMAP.md      # S0–S6 版本规划
+├── docs/LETTA.md        # S6：让她自己长（方案 / 操作 / 风险）
+├── docs/2026-10-30.md   # 当日工作日志（v1.11–v1.14 + Letta 试运行）
+├── letta-lab/           # 本机 Letta 实验场（不入库：venv / 数据 / key）
 ├── scripts/git-push.mjs # 提交/打标签/推送（isomorphic-git，走 github.com）
 ├── scripts/push-api.mjs # 同上，但走 api.github.com（github.com 抽风时用）
 ├── CHANGELOG.md

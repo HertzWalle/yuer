@@ -66,7 +66,7 @@ async function api(path, init = {}, { soft = false } = {}) {
 }
 
 /** 与 .gitignore 一致的忽略规则（不引第三方库，保持最小实现） */
-const IGNORE_DIRS = [/^node_modules$/, /^\.git$/, /^\.npm-cache$/, /^dist$/, /^napcat$/, /^downloads$/, /^logs$/, /^backups$/, /^\.ssh$/, /^memes$/];
+const IGNORE_DIRS = [/^node_modules$/, /^\.git$/, /^\.npm-cache$/, /^dist$/, /^napcat$/, /^downloads$/, /^logs$/, /^backups$/, /^\.ssh$/, /^memes$/, /^letta-lab$/, /^\.tmp/];
 const IGNORE_FILES = [
   /^\.tmp-/,
   /\.pem$/,
@@ -88,7 +88,15 @@ const ignored = (relPath) => {
 
 /** 本地工作区里要提交的文件（相对路径用 / 分隔） */
 function collect(dir = ROOT, out = [], rel = '') {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    // 沙箱里有些目录（venv / pip 临时目录）读不进去，别为它中断整次推送
+    console.warn(`跳过读不进去的目录：${rel || '.'}（${e.code}）`);
+    return out;
+  }
+  for (const entry of entries) {
     const relPath = rel ? `${rel}/${entry.name}` : entry.name;
     if (ignored(relPath)) continue;
     const full = join(dir, entry.name);
@@ -144,19 +152,25 @@ async function main() {
   for (const p of deletes.slice(0, 10)) console.log('  D ' + p);
   if (DRY) return;
 
-  const entries = [];
+  // 先给「有变化」的文件建 blob
+  const newSha = new Map();
   for (const { path, buf } of puts) {
     const blob = await api('/git/blobs', {
       method: 'POST',
       body: JSON.stringify({ content: buf.toString('base64'), encoding: 'base64' }),
     });
-    entries.push({ path, mode: '100644', type: 'blob', sha: blob.sha });
+    newSha.set(path, blob.sha);
   }
-  for (const path of deletes) entries.push({ path, mode: '100644', type: 'blob', sha: null });
 
+  // 整棵树一次建出来（不再用 base_tree：个别中文/长文文件在 base_tree 模式下会被
+  // GitHub 判成 "tree.sha … is not a valid blob"，不带 base_tree 反而稳定）。
+  const entries = [];
+  for (const path of local.keys()) {
+    entries.push({ path, mode: '100644', type: 'blob', sha: newSha.get(path) ?? remote.get(path) });
+  }
   const tree = await api('/git/trees', {
     method: 'POST',
-    body: JSON.stringify({ base_tree: baseTree, tree: entries }),
+    body: JSON.stringify({ tree: entries }),
   });
 
   const name = process.env.GIT_AUTHOR_NAME || 'HudsonZephyr';

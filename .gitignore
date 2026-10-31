@@ -37,3 +37,6 @@ __pycache__/
 dsh-pet-qq/turn.token
 # 登录二维码是一次性的，别进仓库
 qrcode*.png
+
+# local letta lab (venv, data, secrets)
+letta-lab/

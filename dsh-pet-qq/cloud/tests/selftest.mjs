@@ -58,7 +58,13 @@ conf.behavior = {
   voice: { ...(conf.behavior?.voice || {}), enabled: false },
 };
 // 自测里的「主人」是 20001：指令只有主人能发、按群切人格都要用到它
-conf.proactive = { ...(conf.proactive || {}), ownerIds: ['20001', '1360153202'] };
+conf.proactive = {
+  ...(conf.proactive || {}),
+  ownerIds: ['20001', '1360153202'],
+  // 线上的 bridge.config.json 在 Letta 试运行期间把群里主动关掉了（避免两个声音），
+  // 但群相关的用例必须开着才能测，所以这里强制打开。
+  group: { ...((conf.proactive || {}).group || {}), enabled: true },
+};
 
 // 配图资格现在在生成层掷骰子：自测里百分百给资格、且关掉冷却，否则断言会飘
 {
@@ -446,6 +452,8 @@ async function main() {
   await testCoalesce();
   await testFollowUp();
   await testVoiceGate();
+  await testLettaAudit();
+  await testLettaWake();
 
   await testAgency();
 
@@ -1466,3 +1474,73 @@ try {
 const passed = results.filter((r) => r.ok).length;
 console.log(`\n${passed}/${results.length} 通过`);
 if (passed !== results.length) process.exitCode = 1;
+
+// P1：审计与回滚（不联网，只测 diff / 落账 / 快照列表 / 找不到快照）
+async function testLettaAudit() {
+  const a = await load('letta-audit.mjs');
+
+  const prev = [
+    { id: 'b1', label: 'persona', value: '我是小蓝。', readOnly: false },
+    { id: 'b2', label: 'memory', value: '主人怕黑。', readOnly: false },
+    { id: 'b3', label: 'safety', value: '不泄密钥', readOnly: true },
+    { id: 'b4', label: 'old', value: '要删掉的', readOnly: false },
+  ];
+  const next = [
+    { id: 'b1', label: 'persona', value: '我是小蓝，说话直接。', readOnly: false },
+    { id: 'b2', label: 'memory', value: '主人怕黑。\n主人不吃香菜。', readOnly: false },
+    { id: 'b3', label: 'safety', value: '不泄密钥', readOnly: true },
+    { id: 'b5', label: 'fresh', value: '新加的一块', readOnly: false },
+  ];
+
+  const changes = a.diffBlocks(prev, next);
+  const byLabel = Object.fromEntries(changes.map((c) => [c.label, c]));
+  check(
+    '审计：diff 只报变了的块',
+    changes.length === 4 && byLabel.persona?.kind === 'edited' && byLabel.memory?.deltaChars > 0,
+    changes.map((c) => `${c.label}:${c.kind}`).join(','),
+  );
+  check('审计：删掉/新增能区分', byLabel.old?.kind === 'removed' && byLabel.fresh?.kind === 'added');
+  check('审计：没改的块不出现', !byLabel.safety);
+  check('审计：只读块被改会标出来', a.diffBlocks(
+    [{ id: 's', label: 'safety', value: 'a', readOnly: true }],
+    [{ id: 's', label: 'safety', value: 'b', readOnly: true }],
+  )[0]?.kind === 'readonly-changed');
+
+  // 落账（用合成快照，不碰网络）
+  const cfg = { enabled: true, baseUrl: 'http://127.0.0.1:1/v1', agentId: 'agent-test', audit: true };
+  const before = { id: 'snap-before', shot: { at: new Date().toISOString(), blocks: prev } };
+  const after = { id: 'snap-after', shot: { at: new Date().toISOString(), blocks: next } };
+  const rec = await a.recordTurn(cfg, { before, after, text: '记住我不吃香菜', reply: '记住啦。', tools: ['memory_insert'] });
+  check('审计：一轮对话能落账', rec.length === 4 && a.auditReady());
+
+  const rows = await a.readAudit(5);
+  const top = rows[0];
+  check(
+    '审计：账目里有听到的、说的、改了哪块',
+    top?.heard?.includes('香菜') && top?.said?.includes('记住') && top?.changes?.some((c) => c.label === 'memory'),
+    JSON.stringify(top?.changes?.map((c) => c.label)),
+  );
+  check('审计：账目里不存全文，只存摘要', top?.changes?.[0]?.afterHead !== undefined && String(top?.changes?.[0]?.afterHead ?? '').length <= 200);
+
+  // 快照列表与回滚的边界
+  const shots = await a.listSnapshots(5);
+  check('审计：快照列表可读（此刻可能为空数组）', Array.isArray(shots));
+  const missing = await a.rollback(cfg, 'snap-not-exist-xyz');
+  check('审计：找不到快照时说清楚', missing.ok === false && ['not-found', 'no-snapshots'].includes(missing.reason), missing.reason);
+}
+
+/* 10.6c P2：动机接入的纯逻辑（唤醒提示词 + SKIP 判定），不联网 */
+async function testLettaWake() {
+  const m = await load('letta.mjs');
+
+  const prompt = m.wakePrompt({ reason: '冲动攒到 61，阈值 58', hint: '最近主人说过：「今天好累」', mood: '黏人' });
+  check('唤醒提示词说明这是系统提醒、不是主人说话', prompt.includes('不是主人在说话'));
+  check('唤醒提示词带上「为什么想说话」', prompt.includes('冲动攒到 61'));
+  check('唤醒提示词带上最近的上下文', prompt.includes('今天好累'));
+  check('唤醒提示词允许她拒绝', prompt.includes('SKIP'));
+
+  check('SKIP 算拒绝', m.isSkipReply('SKIP') === true);
+  check('「（skip）」也算拒绝', m.isSkipReply('（skip）') === true);
+  check('正常回话不算拒绝', m.isSkipReply('在啊，想你了') === false);
+  check('「不想说」不算 SKIP（那是她的话，要发出去）', m.isSkipReply('不想说') === false);
+}

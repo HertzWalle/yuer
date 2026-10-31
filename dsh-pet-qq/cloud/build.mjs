@@ -124,7 +124,7 @@ async function main() {
 
   // 云端 lib：pet-api 换成云实现，其余（下载器不需要）不打包
   await cp(join(HERE, 'lib', 'pet-api.mjs'), join(DIST, 'lib', 'pet-api.mjs'));
-  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs', 'feeds.mjs', 'memory-manager.mjs', 'turn-server.mjs', 'version.mjs', 'vision.mjs', 'usage.mjs', 'profiles.mjs', 'tts.mjs']) {
+  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs', 'feeds.mjs', 'memory-manager.mjs', 'turn-server.mjs', 'version.mjs', 'vision.mjs', 'usage.mjs', 'letta.mjs', 'letta-audit.mjs', 'profiles.mjs', 'tts.mjs']) {
     await cp(join(HERE, 'lib', f), join(DIST, 'lib', f));
   }
 

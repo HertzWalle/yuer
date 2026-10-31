@@ -24,6 +24,7 @@ import {
   loadPersonas,
   recentMessages,
 } from './lib/pet-api.mjs';
+import { lettaReply, lettaTrial, splitLettaReply } from './lib/letta.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_CONFIG_PATH = join(here, 'bridge.config.json');
@@ -47,6 +48,8 @@ const HELP_TEXT = [
   '/看到        她最近刷到/看到的事（说说、B 站、抖音）',
   '/忘记 关键词 让她忘掉相关的语义记忆',
   '/我是谁      看她对自己的认识',
+  '/她改了啥 [n] 她在 Letta 里改过哪些记忆（默认 5 条）',
+  '/回滚 [编号] 把她的记忆恢复成某个快照（不带编号=列快照）',
   '/解禁 [群号] 清掉某个群的“反感度冷却”（默认当前群）',
   '/规矩 [内容] 定一条硬规矩（/规矩 删 1 删除，/规矩 看全部）',
   '/画像        这个群里她攒的说话印象（群昵称、话多话少、常提什么）',
@@ -549,7 +552,8 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         const segments = [{ type: 'text', data: { text: piece } }];
         if (i === 0 && shouldQuote(msg)) segments.unshift({ type: 'reply', data: { id: String(msg.messageId) } });
         const r = await transport.send(msg, segments);
-        if (r) sent += 1;
+        // 有的 transport 不发回执（undefined），只有明确 false 才算失败
+        if (r !== false) sent += 1;
         else {
           log.warn('气泡发送失败，剩下的不发了');
           break;
@@ -771,6 +775,76 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         await sendText(msg, text ? `【我】${text}` : '还没形成对自己的认识，再聊一阵子就有了。');
       } catch (e) {
         log.warn(`/我是谁 失败：${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    // /她改了啥——Letta 记忆改动账本（新的在前）
+    if (['她改了啥', '账', 'audit'].includes(cmd)) {
+      try {
+        const { readAudit } = await import('./lib/letta-audit.mjs');
+        const n = Math.max(1, Math.min(20, Number(parts[1]) || 5));
+        const rows = await readAudit(n);
+        if (!rows.length) {
+          await sendText(msg, '还没有记录（要她在 Letta 里动过记忆才会有）。');
+          return true;
+        }
+        const lines = rows.map((r, i) => {
+          const t = String(r.at || r.ts || '').replace('T', ' ').slice(5, 16);
+          if (r.kind === 'rollback') return `${i + 1}. ${t} 回滚到 ${r.snapshot}`;
+          const ch = (r.changes || []).map((c) => `${c.label}${c.deltaChars >= 0 ? '+' : ''}${c.deltaChars}字`).join('、') || '（没改）';
+          return `${i + 1}. ${t} ${ch}\n   ${String(r.said || '').slice(0, 40)}`;
+        });
+        await sendText(msg, ['她最近的记忆改动：', ...lines, '', '发「/回滚」看快照列表。'].join('\n'));
+      } catch (e) {
+        log.warn(`/她改了啥 失败：${e?.message ?? e}`);
+        await sendText(msg, `账本读不出来：${e?.message ?? e}`);
+      }
+      return true;
+    }
+
+    // /回滚 [编号]——把她的记忆块恢复成某个快照
+    if (['回滚', 'rollback', 'undo'].includes(cmd)) {
+      try {
+        const { listSnapshots, rollback } = await import('./lib/letta-audit.mjs');
+        const arg = String(parts[1] || '').trim();
+        const trialCfg = conf?.behavior?.letta;
+        if (!trialCfg?.enabled || !trialCfg?.agentId) {
+          await sendText(msg, 'Letta 试运行没开，没有可回滚的东西。');
+          return true;
+        }
+        if (!arg) {
+          const shots = await listSnapshots(8);
+          if (!shots.length) {
+            await sendText(msg, '还没有快照（她动过记忆之后才会有）。');
+            return true;
+          }
+          const lines = shots.map(
+            (s, i) => `${i + 1}. ${String(s.at).replace('T', ' ').slice(5, 19)} ${s.blocks.join(' / ')}`,
+          );
+          await sendText(msg, ['最近的快照：', ...lines, '', '发「/回滚 2」把第 2 条恢复回去。'].join('\n'));
+          return true;
+        }
+        const cfg = { ...trialCfg };
+        const shots = await listSnapshots(8);
+        const byIndex = /^\d+$/.test(arg) ? shots[Number(arg) - 1] : null;
+        const target = byIndex ? byIndex.id : arg;
+        const r = await rollback(cfg, target);
+        if (!r.ok) {
+          const why = { 'no-id': '要给个编号', 'not-found': '没找到这个快照', 'letta-unreachable': '连不上 Letta（隧道断了吧）' }[r.reason] || r.reason;
+          await sendText(msg, `没回滚成：${why}。`);
+          return true;
+        }
+        const done = (r.restored || []).filter((x) => x.ok).map((x) => `${x.label} ${x.from}→${x.to} 字`);
+        await sendText(
+          msg,
+          done.length
+            ? `回滚到 ${r.snapshot} 了：${done.join('、')}。`
+            : `快照 ${r.snapshot} 与现在一致，不用回滚。`,
+        );
+      } catch (e) {
+        log.warn(`/回滚 失败：${e?.message ?? e}`);
+        await sendText(msg, `回滚失败：${e?.message ?? e}`);
       }
       return true;
     }
@@ -1146,6 +1220,21 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
           batch.slice(1).map((m) => m.text),
         );
         const capped = merged.length > 2000 ? merged.slice(0, 2000) : merged;
+
+        // 试运行：指定会话转给本地 Letta（她在那边自己管记忆），失败就回落
+        const trial = lettaTrial(conf?.behavior?.letta, conv);
+        if (trial) {
+          const got = await lettaReply(trial, capped, { log });
+          if (got?.ok) {
+            const bubbles = splitLettaReply(got.reply, trial.maxSegments ?? 3);
+            log.info(
+              `Letta 回复：${String(got.reply).slice(0, 120)}${got.tools?.length ? `（动了 ${got.tools.join('/')}）` : ''}`,
+            );
+            await sendReply(msg, { ok: true, text: got.reply, segments: bubbles });
+            return { ok: true, text: got.reply, segments: bubbles, via: 'letta' };
+          }
+          log.warn('Letta 没接上，回落原来的大脑');
+        }
 
         const reply = await chat(capped, {
           petId,

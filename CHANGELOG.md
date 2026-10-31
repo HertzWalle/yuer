@@ -3,6 +3,42 @@
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
 架构大改或跑不通旧数据 → MAJOR。当前版本见根目录 `VERSION`，每个版本打一个 `vX.Y.Z` 标签。
 
+## v1.15.0 — 她改了什么能查、能撤回；主动开口也由她自己定（2026-10-31）
+
+试运行的第二个阶段：先给她装**刹车和行车记录仪**（P1），再把「想不想说话」交给她（P2）。
+
+### P1 · 审计与回滚（`cloud/lib/letta-audit.mjs`）
+
+- 每次走 Letta 的对话，回复前抓一份记忆块快照（`data/letta-snapshots/snap-<时间>-<随机>.json`，留最近 60 份），
+  回复后对比块变化，把「听到什么 / 说了什么 / 改了哪块、改了多少字」写进 `logs/letta-audit.jsonl`。
+- 新增两条主人指令：`/她改了啥 [n]`（最近 n 次的改动清单，带前后片段）、`/回滚 [快照id]`（把块恢复成那份快照）。
+- 只读块（`safety`）被改会单独标出来——正常情况下它不该变。
+- 审计挂了不影响回话：整段 `try/catch`，只 warn。
+
+### P2 · 动机接入（`scheduler.mjs` + `letta.mjs`）
+
+- 冲动攒够、闸门全过之后，不再由我们直接生成一条消息，而是把「为什么现在想说话」交给她：
+  `wakePrompt({reason, hint, mood})` → `POST /messages` → 她自己决定说什么。
+- 她回 `SKIP` = 这会儿不想说：扣 25 点冲动、记 `self-skip`，不再追问。
+- 她那边没上线 / 超时 → 自动回落原来的主动大脑（`generateProactive`），「还会主动找你」这个功能不消失。
+- 开关：`proactive.viaLetta`（默认 true，但只有 `behavior.letta.convs` 白名单里的会话才会真的走）。
+
+### 测试与文档
+
+- 自测 **152/152**（新增 8 条：唤醒提示词、SKIP 判定、审计 diff/落账/快照/回滚兜底）。
+- `docs/LETTA.md` 补「审计怎么用」「动机接入怎么工作」；`docs/ROADMAP.md` 的 S6 勾掉 P1/P2。
+
+## 未发布 — Letta 试运行（2026-10-30）
+
+不是发版，是**方向试验**：把「她是谁」从写死的人格，改成她自己能改写的记忆块。
+
+- 新增 `cloud/lib/letta.mjs`：会话白名单 + Letta 调用 + 回复拆气泡；失败一律 `null`，让桥回落原引擎。
+- `qq-bridge.mjs`：`behavior.letta.convs` 命中的会话先走 Letta，日志打 `Letta 回复：…` / `Letta 没接上，回落原来的大脑`。
+- 试运行范围：私聊 `1360153202`、群 `1106592574`；期间 `proactive.group.enabled=false`（避免群里两个声音）。
+- 本机：`letta-lab/`（letta-nightly 0.11.5 + cpython 3.12 + bge-m3），`chat.cmd` 直聊、`tunnel.cmd` 反向隧道。
+- 实验：云端 619+196 条记忆压成 898 字灌入；30 轮 + 2 次夜间巩固后，persona 524→588、memory 898→1187，红线块未动。
+- 详见 `docs/LETTA.md` 与 `docs/2026-10-30.md`。
+
 ## v1.14.0 — 语音只发语音，主人要就发（2026-10-28）
 
 用户截图里：她先发一条语音，紧跟着又把同一句话用文字发了一遍；后面主人说「语音呢？打字敷衍我」，她答「本鲸没有语音功能呀，只能打字」。

@@ -29,7 +29,19 @@
       "maxChars": 60
     },
     "voiceDelayMs": 400,
-    "followUpMinutes": 12
+    "followUpMinutes": 12,
+    "letta": {
+      "enabled": true,
+      "baseUrl": "http://127.0.0.1:8283/v1",
+      "agentId": "agent-7c89ac1b-1de7-4b9d-a375-c15417e97ad2",
+      "convs": [
+        "private:1360153202",
+        "group:1106592574"
+      ],
+      "timeoutMs": 120000,
+      "maxSegments": 3,
+      "audit": true
+    }
   },
   "proactive": {
     "enabled": true,
@@ -51,7 +63,7 @@
     "commitmentLeadMin": 20,
     "dryRun": false,
     "group": {
-      "enabled": true,
+      "enabled": false,
       "ratePerHour": 6,
       "threshold": 120,
       "cost": 120,
@@ -102,7 +114,8 @@
         "quiet": 1.5,
         "dead": 0.8
       }
-    }
+    },
+    "viaLetta": true
   },
   "groupWhitelist": [],
   "userBlacklist": []
