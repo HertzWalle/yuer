@@ -11,6 +11,7 @@
     "privateReply": true,
     "groupReply": "at",
     "sendMeme": true,
+    "draw": { "enabled": true, "limitPrivate": 10, "limitGroup": 3, "fast": false },
     "imageDelayMs": 600,
     "typingDelayMs": 300,
     "logMessages": true,

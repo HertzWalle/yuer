@@ -220,6 +220,7 @@ node persona.mjs test 在吗     # 让她回一句（同时会弹在桌宠气泡
 | `/看到`、`/忘记 关键词`、`/我是谁` | 语义记忆：最近刷到什么 / 忘掉某条 / 看自我认知 |
 | `/她改了啥`、`/她改了啥 10` | Letta 试运行：看她最近把自己改了哪里（听到 / 说了 / 改了哪块 + 前后片段） |
 | `/回滚`、`/回滚 snap-20261031…` | 把记忆块恢复成某份快照（不带参数会先列最近的快照） |
+| `/画 描述` | 让她画一张图发过来，比如 `/画 窗边的橘猫，水彩风`（群里有每日上限） |
 | `/ping` | 测活 |
 
 不认识 `/xxx` 会当成普通聊天。
@@ -406,6 +407,16 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 - 主人明确要语音（「语音呢」「唱两句」「念一下」「发个语音呗」）→ **绕过概率直接发语音**，模型也被要求不要声称自己只能打字。
 - 群里不发（`voice.privateOnly: true`）；音色 `zh-CN-XiaoyiNeural`（换型对比见 `docs/ROADMAP.md` → 语音（TTS）选型），可换 `edge-tts --list-voices` 里任意一个。
 - 依赖：服务器 `edge-tts` + `ffmpeg`（见 `cloud/remote-deploy-v9.sh`）。
+
+### 生图（v1.16.0：她自己会画一张）
+
+- 她自己想画：回复末尾写 `[画:一句画面描述]`（和表情包 `[图:名称]` 同一套解析），桥把文字先发出去、图生成好再补一条。只有 `pet.json` 的 `drawEnabled: true` 且服务器配了 `MODELSCOPE_API_KEY` 才会给她这个资格，否则她根本不知道有这个标记。
+- 主人点名：`/画 窗边的橘猫，水彩风`（仅主人，群里也生效）。
+- 底座：**ModelScope（魔搭）API-Inference**，模型 `Qwen/Qwen-Image`（中文最稳），可换 `Tongyi-MAI/Z-Image-Turbo`（快）等——异步任务，走免费额度（账号日配额 + 单模型日限）。**实测**：`Qwen/Qwen-Image` 约 **3 分钟**（水彩/画风听劝），`Tongyi-MAI/Z-Image-Turbo` 约 **40 秒**（更快但会忽略画风要求、偏写实）；所以默认用 Qwen，`behavior.draw.fast: true` 切 turbo。
+- 免费 key：`https://modelscope.cn` → 个人中心 → 访问令牌，写进 `/opt/dsh-pet/.env` 的 `MODELSCOPE_API_KEY=` 再重启。
+- 配额与开关：`bridge.config.json` 的 `behavior.draw = { enabled, limitPrivate: 10, limitGroup: 3, fast }`；群里默认**不给**画图资格（`pet.json` 的 `drawInGroup: false`）。
+- 安全硬拦：`cloud/lib/imagegen.mjs` 的 `BLOCKED` 正则拦露骨/血腥/未成年性化/真人私照类描述，命中直接回「这个我不画。」——不靠模型自觉。
+- 额度账：`data/image-quota.json` 按天按场景计数（北京时间的「今天」），只留 14 天。
 
 ### 调参对照表（自己改这些，不用改代码）
 

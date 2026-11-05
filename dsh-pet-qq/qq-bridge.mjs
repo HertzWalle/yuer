@@ -45,6 +45,7 @@ const HELP_TEXT = [
   '/空间        看她 QQ 空间在不在用、今天发没发',
   '/空间 发 内容 手动发一条纯文字说说（仅主人）',
   '/空间 关     让她别碰空间（不发也不看），/空间 开 恢复',
+  '/画 描述     画一张图发过来（群聊每人每天有上限，主人可调），比如 /画 窗边的橘猫，水彩风',
   '/看到        她最近刷到/看到的事（说说、B 站、抖音）',
   '/忘记 关键词 让她忘掉相关的语义记忆',
   '/我是谁      看她对自己的认识',
@@ -469,6 +470,55 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     });
   };
 
+  /**
+   * 画一张并发过去。`paintOne` 同时被「她自己想画」和 `/画` 指令复用。
+   * 返回 true 表示图发出去了（用于统计与「至少回复了一条」的判断）。
+   */
+  async function paintOne(msg, prompt, scope) {
+    let gen;
+    try {
+      gen = await import('./lib/imagegen.mjs');
+    } catch (e) {
+      log.warn(`生图模块加载失败：${e?.message ?? e}`);
+      return false;
+    }
+    const drawConf = behavior.draw || {};
+    if (drawConf.enabled === false) return false;
+    if (!gen.imageReady()) {
+      log.warn('生图没配 MODELSCOPE_API_KEY，跳过');
+      return false;
+    }
+    const limit = Number(msg.kind === 'group' ? drawConf.limitGroup ?? 3 : drawConf.limitPrivate ?? 10) || 0;
+    const quota = await gen.takeQuota(scope, limit);
+    if (!quota.ok) {
+      log.info(`生图配额用完（${scope} ${quota.used}/${quota.limit}）`);
+      await transport.send(msg, [{ type: 'text', data: { text: '今天画的够多了，明天再画吧。' } }]);
+      return false;
+    }
+    log.info(`开始生图（${scope}，第 ${quota.used} 张）：${String(prompt).slice(0, 60)}`);
+    const out = await gen.generateImage(prompt, { fast: drawConf.fast === true });
+    if (!out.ok) {
+      log.warn(`生图失败：${out.reason} ${out.message ?? ''}`);
+      if (out.reason === 'blocked') {
+        await transport.send(msg, [{ type: 'text', data: { text: '这个我不画。' } }]);
+      } else {
+        await transport.send(msg, [{ type: 'text', data: { text: '（画到一半没画成……等会儿再试？）' } }]);
+      }
+      return false;
+    }
+    log.info(`生图完成：${out.model} ${out.ms}ms ${(out.buffer.length / 1024).toFixed(0)}KB`);
+    if (behavior.imageDelayMs) await new Promise((r) => setTimeout(r, behavior.imageDelayMs));
+    const r = await transport.send(msg, [
+      { type: 'image', data: { file: `base64://${out.buffer.toString('base64')}` } },
+    ]);
+    if (r === false) {
+      log.warn('生图发送失败');
+      return false;
+    }
+    stats.drew = (stats.drew || 0) + 1;
+    return true;
+  }
+
   async function sendReply(msg, reply) {
     // 出站最后一道闸：模型偶尔会把内部结构（system_reminder / DSML / 我们拼进 prompt 的段落）
     // 当正文吐出来，漏一条人设就穿帮。云端 pet-api 已经洗过一遍，本机后端也要兜住。
@@ -574,6 +624,13 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
         await transport.send(msg, [{ type: 'text', data: { text: `（想发「${reply.image}」那张图，但找不到）` } }]);
         sent += 1;
       }
+    }
+
+    // 她自己决定画一张：文字先发出去，图慢慢到（真生成要 10~20 秒，别让人干等）
+    if (reply?.draw) {
+      const scope = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
+      const drawn = await paintOne(msg, reply.draw, scope);
+      if (drawn) sent += 1;
     }
 
     if (!sent) {
@@ -746,6 +803,18 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       } catch (e) {
         log.warn(`/看到 失败：${e?.message ?? e}`);
       }
+      return true;
+    }
+
+    // /画 <描述>——主人直接要一张图（她自己想画走的是回复里的 [画:…] 标记）
+    if (['画', 'draw', '生图'].includes(cmd)) {
+      const prompt = arg.trim();
+      if (!prompt) {
+        await sendText(msg, '要画什么？比如：/画 一只在窗边晒太阳的橘猫，水彩风');
+        return true;
+      }
+      const scope = msg.kind === 'group' ? `group:${msg.groupId}` : `private:${msg.senderId}`;
+      await paintOne(msg, prompt, scope);
       return true;
     }
 

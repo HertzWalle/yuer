@@ -21,6 +21,7 @@ import { composeSystemPrompt } from './prompt.mjs';
 import { notesBrief, recall, recentNotes, seenBrief, touch } from './semantic.mjs';
 import { loadSummary, manageHistory, selfBrief } from './memory-manager.mjs';
 import { extractChatImage, imageInstruction, limitPool, readMemePool, resolveMemeFile } from './memes.mjs';
+import { drawInstruction, extractDraw, imageReady, stripDrawTag } from './imagegen.mjs';
 import { chatCompletion } from './llm.mjs';
 import { describeImage } from './vision.mjs';
 import { loadAgency, moodBrief, rulesBrief } from './agency.mjs';
@@ -622,10 +623,15 @@ export async function chat(
     kind === 'group' && speaker?.id
       ? await profileBrief({ conv, userId: speaker.id, name: speaker.name })
       : '';
+  // 生图资格：有 key、开了开关，群里还得单独开（群里默认不画）
+  const drawAllowed = conf.drawEnabled === true && imageReady() && (kind !== 'group' || conf.drawInGroup === true);
+  const drawTail = drawAllowed ? drawInstruction() : '';
+
   const system =
     rules +
     composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
     REPLY_STYLE +
+    drawTail +
     mood +
     background +
     speakerBrief;
@@ -663,8 +669,11 @@ export async function chat(
 
   const parsed = extractChatImage(res.text, pool);
   const image = parsed.image;
-  const finalText =
-    stripInternal(image ? parsed.text : stripMemeTag(parsed.text)).trim() || stripInternal(res.text).trim();
+  // 画图标记：只在有资格时才认，否则当普通文字（别让模型自己创造出来）
+  const drew = drawAllowed ? extractDraw(image ? parsed.text : stripMemeTag(parsed.text)) : { draw: null, text: parsed.text };
+  const draw = drew.draw;
+  const baseText = draw ? drew.text : stripDrawTag(image ? parsed.text : stripMemeTag(parsed.text));
+  const finalText = stripInternal(baseText).trim() || stripInternal(res.text).trim();
 
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
   const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(conf.maxBubbles) || 3)));
@@ -686,6 +695,7 @@ export async function chat(
     text: stored,
     segments,
     ...(image ? { image } : {}),
+    ...(draw ? { draw } : {}),
     ...(voiceWanted ? { voiceWanted: true } : {}),
   };
 }

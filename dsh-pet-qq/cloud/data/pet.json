@@ -149,5 +149,7 @@
       "announcement": "按活跃度分档：热闹群最多 100 条/天，冷清群偶尔主动开场",
       "ratePerHour": 6
     }
-  }
+  },
+  "drawEnabled": true,
+  "drawInGroup": false
 }

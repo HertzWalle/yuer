@@ -11,7 +11,7 @@
 
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { request } from 'node:http';
+import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -454,6 +454,7 @@ async function main() {
   await testVoiceGate();
   await testLettaAudit();
   await testLettaWake();
+  await testImagegen();
 
   await testAgency();
 
@@ -1543,4 +1544,89 @@ async function testLettaWake() {
   check('「（skip）」也算拒绝', m.isSkipReply('（skip）') === true);
   check('正常回话不算拒绝', m.isSkipReply('在啊，想你了') === false);
   check('「不想说」不算 SKIP（那是她的话，要发出去）', m.isSkipReply('不想说') === false);
+}
+
+/* 10.6d 生图：配额、安全闸、标记解析，以及 ModelScope 异步流程（假服务器，不打真实接口） */
+async function testImagegen() {
+  const img = await load('imagegen.mjs');
+
+  check('生图：正常描述放行', img.checkPrompt('一只在窗边晒太阳的橘猫，水彩风').ok === true);
+  check('生图：涩图被硬拦', img.checkPrompt('来点涩图').ok === false);
+  check('生图：未成年相关被拦', img.checkPrompt('萝莉 裸 照').ok === false);
+  check('生图：空描述被拒', img.checkPrompt('   ').ok === false);
+  check('生图：画图指令里写了标记格式', img.drawInstruction().includes('[画:'));
+
+  const d1 = img.extractDraw('好呀，我画一张。\n[画:一只橘猫在窗台晒太阳]');
+  check('生图：能抠出画图标记并剥掉', d1.draw === '一只橘猫在窗台晒太阳' && d1.text === '好呀，我画一张。', `${d1.draw} / ${d1.text}`);
+  check('生图：没有标记时不动正文', img.extractDraw('就聊聊天').draw === null);
+
+  // 配额：按场景分桶，到上限就不给
+  const scope = `private:test-${Date.now()}`;
+  const q1 = await img.takeQuota(scope, 2);
+  const q2 = await img.takeQuota(scope, 2);
+  const q3 = await img.takeQuota(scope, 2);
+  check('生图：配额到上限就拒', q1.ok === true && q2.ok === true && q3.ok === false, `used ${q1.used}/${q2.used} limit ${q3.limit}`);
+  const other = await img.takeQuota(`group:test-${Date.now()}`, 2);
+  check('生图：换了场景重新算配额', other.ok === true && other.used === 1);
+
+  // 假 ModelScope：提交 → 轮询（先 RUNNING 再 SUCCEED）→ 下载
+  const png = Buffer.alloc(4096, 7);
+  let polls = 0;
+  const srv = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.startsWith('/v1/images/generations')) {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        if (req.headers['x-modelscope-async-mode'] !== 'true') {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          return res.end('{"error":"missing async header"}');
+        }
+        const j = JSON.parse(body || '{}');
+        if (!j.prompt) {
+          res.writeHead(400, { 'content-type': 'application/json' });
+          return res.end('{}');
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        return res.end(JSON.stringify({ task_id: 'task-1', model: j.model }));
+      });
+      return;
+    }
+    if (req.url === '/v1/tasks/task-1') {
+      if (req.headers['x-modelscope-task-type'] !== 'image_generation') {
+        res.writeHead(400, { 'content-type': 'application/json' });
+        return res.end('{}');
+      }
+      polls += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (polls < 2) return res.end(JSON.stringify({ task_status: 'RUNNING' }));
+      const port = srv.address().port;
+      return res.end(JSON.stringify({ task_status: 'SUCCEED', output_images: [`http://127.0.0.1:${port}/img.png`] }));
+    }
+    if (req.url === '/img.png') {
+      res.writeHead(200, { 'content-type': 'image/png' });
+      return res.end(png);
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    return res.end('{}');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  process.env.MODELSCOPE_API_BASE = `http://127.0.0.1:${port}/v1`;
+  process.env.MODELSCOPE_API_KEY = 'test-key';
+  process.env.MODELSCOPE_POLL_MS = '5';
+  try {
+    const out = await img.generateImage('一只橘猫');
+    check(
+      '生图：提交→轮询→下载能走完',
+      out.ok === true && out.buffer.length === png.length && out.mime === 'image/png',
+      out.ok ? `${out.model} ${out.ms}ms` : `${out.reason} ${out.message}`,
+    );
+    const blocked = await img.generateImage('来点涩图');
+    check('生图：被拦的描述不发请求', blocked.ok === false && blocked.reason === 'blocked', blocked.reason);
+  } finally {
+    srv.close();
+    delete process.env.MODELSCOPE_API_BASE;
+    delete process.env.MODELSCOPE_API_KEY;
+    delete process.env.MODELSCOPE_POLL_MS;
+  }
 }

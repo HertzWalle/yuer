@@ -1,3 +1,20 @@
+## v1.16.0 — 生图（2026-11-05）
+
+### 新增：她自己会画一张
+- 底座 **ModelScope（魔搭）API-Inference**，模型 `Qwen/Qwen-Image`（可换 `Tongyi-MAI/Z-Image-Turbo` 等）。异步任务：提交（`X-ModelScope-Async-Mode: true`）→ 轮询（`X-ModelScope-Task-Type: image_generation`）→ 下载。客户端流程改编自 MIT 的 `modelscope-image-mcp@1.0.3`。
+- `cloud/lib/imagegen.mjs`：`generateImage` / `checkPrompt` / `takeQuota` / `drawInstruction` / `extractDraw` / `imageReady`。
+- 她自己想画：回复末尾 `[画:描述]`（与 `[图:名称]` 同一套解析），文字先发、图生成好补一条；只有 `drawEnabled` + 有 key 才给这个资格。
+- 主人点名：`/画 <描述>`。
+- 安全：`BLOCKED` 正则硬拦露骨/血腥/未成年性化/真人私照类描述；配额 `data/image-quota.json`（按天按场景，私聊 10 / 群 3，群里默认不给资格 `drawInGroup: false`）。
+- 自测：新增 `testImagegen`（假 ModelScope 服务器跑完整提交→轮询→下载 + 安全闸 + 配额天然分桶）。
+
+### 实测（腾讯云 2C2G，2026-11-05）
+- `Qwen/Qwen-Image` 1024×1024：**187 秒**、1.1MB PNG、水彩风格照做；`Tongyi-MAI/Z-Image-Turbo`：**40 秒**、1.3MB、偏写实且忽略「水彩风」。默认 Qwen，`behavior.draw.fast` 切 turbo。
+- 免费额度需账号完成邮箱验证，否则提交任务直接 `HTTP 403 … Magicubes is only available to verified accounts`。
+
+### 修复
+- `takeQuota` 里嵌套调用 `store.writeJson` 会与 `withLock` 自锁死；改成自己 mkdir+write+rename。
+
 # CHANGELOG
 
 版本号遵循 `MAJOR.MINOR.PATCH`：加了用户能感知的新能力 → MINOR；只修 bug / 调参数 → PATCH；
