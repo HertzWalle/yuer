@@ -363,6 +363,11 @@ const REPLY_STYLE = `
 先给结论，别写成公文，也别用列表符号；不要写括号里的动作或旁白（比如「（歪头）」），情绪用语气词和句子本身表现。
 你能发语音：私聊里一句话（不超过 60 字）可以变成一条语音发出去；主人说「语音呢」「唱两句」「念一下」时，直接把那句说出来就行，**不要说自己只能打字、也别解释自己有没有语音功能**。群里不发语音。`;
 
+/** 群聊版：群里是「顺口一句」，不是私聊那种两三句连发（用户明确要求：不要一次回两句） */
+const GROUP_STYLE = `
+
+【群聊方式】这是群聊，不是私聊：**一条就说完**，最多一句、20 字以内；别连发、别分点、别先铺垫再进入正题，也别追着补第二句。别人没问你，就在旁边待着。`;
+
 /**
  * 记忆分桶：私聊和主人共用 `<petId>`（沿用旧结构，桌面端也认得），
  * 每个群单开一桶 `<petId>@<conv>`——群里是「你鱼姐」、私聊是「小蓝」，
@@ -630,7 +635,7 @@ export async function chat(
   const system =
     rules +
     composeSystemPrompt({ prompt: persona.prompt, name: persona.name, id: petId, now: new Date() }) +
-    REPLY_STYLE +
+    (kind === 'group' ? GROUP_STYLE : REPLY_STYLE) +
     drawTail +
     mood +
     background +
@@ -676,8 +681,12 @@ export async function chat(
   const finalText = stripInternal(baseText).trim() || stripInternal(res.text).trim();
 
   // 拆成几个气泡：模型自己分好段的直接采纳，一整句的按内容决定要不要拆
-  const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(conf.maxBubbles) || 3)));
-  const bias = Number.isFinite(Number(conf.splitChance)) ? Number(conf.splitChance) : 0.5;
+  // 群里只发一条（maxBubblesGroup 默认 1，且默认不主动拆分）；私聊照旧
+  const groupReply = kind === 'group';
+  const wantBubbles = groupReply ? (conf.maxBubblesGroup ?? 1) : conf.maxBubbles;
+  const wantBias = groupReply ? (conf.splitChanceGroup ?? 0) : conf.splitChance;
+  const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(wantBubbles) || 1)));
+  const bias = Number.isFinite(Number(wantBias)) ? Number(wantBias) : groupReply ? 0 : 0.5;
   const segments = tidyBubbles(splitBubbles(stripActionNotes(finalText), { max: maxBubbles, bias }));
   const stored = (segments.length ? segments.join(' ') : finalText).trim();
 

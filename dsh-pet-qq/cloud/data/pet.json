@@ -151,5 +151,7 @@
     }
   },
   "drawEnabled": true,
-  "drawInGroup": false
+  "drawInGroup": true,
+  "maxBubblesGroup": 1,
+  "splitChanceGroup": 0
 }

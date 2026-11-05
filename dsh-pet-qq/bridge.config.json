@@ -11,7 +11,12 @@
     "privateReply": true,
     "groupReply": "at",
     "sendMeme": true,
-    "draw": { "enabled": true, "limitPrivate": 10, "limitGroup": 3, "fast": false },
+    "draw": {
+      "enabled": true,
+      "limitPrivate": 10,
+      "limitGroup": 10,
+      "fast": false
+    },
     "imageDelayMs": 600,
     "typingDelayMs": 300,
     "logMessages": true,
@@ -42,7 +47,8 @@
       "timeoutMs": 120000,
       "maxSegments": 3,
       "audit": true
-    }
+    },
+    "maxBubblesGroup": 1
   },
   "proactive": {
     "enabled": true,
@@ -86,34 +92,34 @@
         "quietPerMin": 0.2
       },
       "dailyLimit": {
-        "hot": 100,
-        "normal": 40,
-        "quiet": 20,
-        "dead": 6
+        "hot": 30,
+        "normal": 15,
+        "quiet": 8,
+        "dead": 4
       },
       "hourLimit": {
-        "hot": 15,
-        "normal": 10,
-        "quiet": 4,
-        "dead": 2
+        "hot": 5,
+        "normal": 3,
+        "quiet": 2,
+        "dead": 1
       },
       "minGapSec": {
-        "hot": 75,
-        "normal": 240,
-        "quiet": 900,
-        "dead": 3600
+        "hot": 300,
+        "normal": 600,
+        "quiet": 1500,
+        "dead": 5400
       },
       "urgencyMin": {
-        "hot": 8,
-        "normal": 9,
-        "quiet": 10,
-        "dead": 13
+        "hot": 10,
+        "normal": 11,
+        "quiet": 12,
+        "dead": 15
       },
-      "shareCap": 0.12,
+      "shareCap": 0.06,
       "idleOpenMin": 25,
       "openerPerHour": {
-        "quiet": 1.5,
-        "dead": 0.8
+        "quiet": 0.5,
+        "dead": 0.3
       }
     },
     "viaLetta": true

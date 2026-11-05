@@ -536,7 +536,9 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
     const wantImage = behavior.sendMeme !== false && Boolean(reply?.image);
 
     // 一条回复拆成几个气泡（条数由内容决定，模型自己分好段就用它的分段）
-    const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(behavior.maxBubbles) || 6)));
+    // 群里只发一条：哪怕模型自己分了段，也只留第一段（用户要求：不要一次回两句）
+    const wantMax = msg.kind === 'group' ? (behavior.maxBubblesGroup ?? 1) : behavior.maxBubbles;
+    const maxBubbles = Math.max(1, Math.min(8, Math.floor(Number(wantMax) || 1)));
     const bubbles = (Array.isArray(reply?.segments) && reply.segments.length
       ? reply.segments
       : [text]

@@ -176,6 +176,32 @@ async function main() {
     mock.setReplyResolver(null);
   }
 
+  // 5b2 群里只发一条：模型就算自己分成两段，群里也只发第一段（用户要求：不要一次回两句）
+  {
+    mock.setReplyResolver(() => '累就早点睡。\n别熬了，明天再说');
+    const n3 = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        message_id: 'bubble-group-1',
+        group_id: 333,
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [
+          { type: 'at', data: { qq: '10000', name: '小蓝' } },
+          { type: 'text', data: { text: ' 我又熬夜了' } },
+        ],
+      }),
+    );
+    const pieces = sent.slice(n3).filter((x) => x.segments.some((s) => s.type === 'text'));
+    check(
+      '群里只发一条气泡',
+      pieces.length === 1 && segText(pieces[0].segments).includes('累就早点睡'),
+      pieces.map((p) => segText(p.segments)).join(' | '),
+    );
+    mock.setReplyResolver(null);
+  }
+
   // 5c 引用回复：别人引用她说过的话再问一句，她要接得上，回的时候也带引用
   {
     quoted.set('900', {
