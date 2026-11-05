@@ -42,7 +42,7 @@ process.env.DEEPSEEK_BASE_URL = mock.baseUrl;
 process.env.DEEPSEEK_MODEL = 'mock';
 process.env.TZ = process.env.TZ || 'Asia/Shanghai';
 
-const { createBridge } = await import(pathToFileURL(join(DIST, 'qq-bridge.mjs')).href);
+const { createBridge, normalizeMessage } = await import(pathToFileURL(join(DIST, 'qq-bridge.mjs')).href);
 const petApi = await import(pathToFileURL(join(DIST, 'lib', 'pet-api.mjs')).href);
 /** 从 dist/lib 里加载一个模块（自测直接用云端实现，测的就是会上线的那份代码） */
 const load = (p) => import(pathToFileURL(join(DIST, 'lib', p)).href);
@@ -158,6 +158,55 @@ async function main() {
   );
   check('群内被 @ 时回复并带昵称', lastWith('text')?.to === 'group:333' && segText(lastWith('text').segments).includes('小明'), segText(lastWith('text')?.segments ?? '').slice(0, 60));
 
+  // 4b 手打「@名字」也算在叫她：这种消息没有 at 段，只有纯文本（v1.16.2 修的）
+  {
+    const raw = normalizeMessage(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [{ type: 'text', data: { text: '@鱼儿 你怎么看这场比赛' } }],
+      }),
+      { groupReply: 'at' },
+      { observeGroups: true, selfNames: ['鱼儿'] },
+    );
+    check(
+      '手打 @名字 认成在叫她，并从正文里去掉',
+      raw?.atMe === true && raw.observeOnly === false && raw.text === '你怎么看这场比赛',
+      raw ? `atMe=${raw.atMe} observeOnly=${raw.observeOnly} text=${JSON.stringify(raw.text)}` : 'null',
+    );
+
+    const noName = normalizeMessage(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        message: [{ type: 'text', data: { text: '@鱼儿 你怎么看这场比赛' } }],
+      }),
+      { groupReply: 'at' },
+      { observeGroups: true, selfNames: [] },
+    );
+    check('没有名字表时仍然只旁听（不会乱回）', noName?.atMe === false && noName?.observeOnly === true, JSON.stringify(noName?.observeOnly));
+
+    const namedBridge = createBridge({ conf, personas, transport, log: quiet, selfNames: ['鱼儿'] });
+    const nBefore = sent.length;
+    await namedBridge.handleEvent(
+      ev({
+        message_type: 'group',
+        group_id: 333,
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [{ type: 'text', data: { text: '@鱼儿 你觉得呢' } }],
+      }),
+    );
+    const namedReply = lastWith('text');
+    check(
+      '手打 @名字 的群消息真的回了',
+      sent.length > nBefore && namedReply?.to === 'group:333',
+      segText(namedReply?.segments ?? []).slice(0, 40),
+    );
+  }
+
   // 5 表情包（假大脑对含「累」的话会附 [图:…]，应解析成 image 段）
   const imgMsg = lastWith('image');
   check('表情包按 [图:名称] 单独成一条发送', Boolean(imgMsg) && imgMsg.segments.length === 1 && imgMsg.segments[0].type === 'image', imgMsg ? '独立 image 消息' : '没发图');
@@ -202,7 +251,29 @@ async function main() {
     mock.setReplyResolver(null);
   }
 
-  // 5c 引用回复：别人引用她说过的话再问一句，她要接得上，回的时候也带引用
+  // 5b3 模型用空格代替逗号写中文时，不能把空格原样发出去（群里看到的会是「今天好累 早点睡吧」）
+  {
+    mock.setReplyResolver(() => '今天好累 早点睡吧 别熬夜了');
+    const n4 = sent.length;
+    await bridge.handleEvent(
+      ev({
+        message_type: 'group',
+        message_id: 'space-group-1',
+        group_id: 333,
+        user_id: 20123,
+        sender: { user_id: 20123, card: '小明', nickname: '小明' },
+        message: [
+          { type: 'at', data: { qq: '10000', name: '小蓝' } },
+          { type: 'text', data: { text: ' 今晚还得赶工' } },
+        ],
+      }),
+    );
+    const said = sent.slice(n4).filter((x) => x.segments.some((s) => s.type === 'text')).map((x) => segText(x.segments)).join(' | ');
+    check('中文之间的空格换成逗号（不发带空格的句子）', said.includes('，') && !/[一-龥] [一-龥]/.test(said), said);
+    mock.setReplyResolver(null);
+  }
+
+
   {
     quoted.set('900', {
       sender: { user_id: 10000, nickname: '小蓝' },

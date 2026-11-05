@@ -111,7 +111,7 @@ export function segmentsToPlain(segs) {
  * 把 OneBot 消息事件拍平成 { kind, text, atMe, ... }。
  * 群消息两种回法：at = 被 @ 才回（默认，最不烦人）；all = 群里每条都回。
  */
-export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = {}) {
+export function normalizeMessage(ev, behavior = {}, { observeGroups = false, selfNames = [] } = {}) {
   if (!ev || ev.post_type !== 'message') return null;
   const selfId = String(ev.self_id ?? '');
   const senderId = String(ev.sender?.user_id ?? ev.user_id ?? '');
@@ -157,8 +157,22 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
     );
   }
 
-  const text = sep(parts.join(' ')).replace(/\s+/g, ' ');
+  let text = sep(parts.join(' ')).replace(/\s+/g, ' ');
   const senderName = sep(ev.sender?.card) || sep(ev.sender?.nickname) || senderId;
+
+  // 有人是手打「@鱼儿」而不是从列表里点选的——那种消息根本没有 at 段，只有纯文本，
+  // 于是群里看着像在叫她、程序却当成「没 @ 我」，一条都不回。认名字兜住这种情况。
+  if (isGroup && !atMe && selfNames.length) {
+    const esc = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const hit = selfNames.find((n) => n && new RegExp(`@\\s*${esc(n)}`).test(text));
+    if (hit) {
+      atMe = true;
+      text = text
+        .replace(new RegExp(`@\\s*${esc(hit)}\\s*`, 'g'), ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  }
 
   const groupReply = behavior.groupReply ?? 'at';
   let observeOnly = false;
@@ -199,8 +213,9 @@ export function normalizeMessage(ev, behavior = {}, { observeGroups = false } = 
  * @param {object} opt.personas   personas.json 内容
  * @param {{send:(msg:object,segments:object[])=>Promise<object|null>}} opt.transport
  * @param {object} [opt.log]
+ * @param {Set<string>|string[]} [opt.selfNames] 她自己的名字（昵称 / 群名片），用来认「手打 @名字」
  */
-export function createBridge({ conf, personas, transport, log = makeLogger('bridge') }) {
+export function createBridge({ conf, personas, transport, log = makeLogger('bridge'), selfNames = [] }) {
   const petId = conf.pet?.id ?? 'main';
   const behavior = conf.behavior ?? {};
   const groupWhitelist = new Set((conf.groupWhitelist ?? []).map(String));
@@ -1190,7 +1205,10 @@ export function createBridge({ conf, personas, transport, log = makeLogger('brid
       if (ev.meta_event_type === 'lifecycle') log.info(`OneBot 就绪：self_id=${ev.self_id} (${ev.sub_type ?? ''})`);
       return null;
     }
-    const msg = normalizeMessage(ev, behavior, { observeGroups: behavior.observeGroups !== false });
+    const msg = normalizeMessage(ev, behavior, {
+      observeGroups: behavior.observeGroups !== false,
+      selfNames: [...selfNames].filter(Boolean),
+    });
     if (!msg) {
       stats.ignored += 1;
       return null;
@@ -1514,10 +1532,38 @@ export async function start(configPath = DEFAULT_CONFIG_PATH) {
     // 引用回复要用 get_msg 取被引用的原话（没有这个方法的旧 transport 会安静跳过）
     call: (action, params) => onebot.call(action, params),
   };
-  const bridge = createBridge({ conf, personas, transport, log });
+  // 她自己的名字：昵称 + 各群群名片。有人手打「@鱼儿」时消息里没有 at 段，
+  // 只能靠名字认出来（learnNames 在连上之后补齐）
+  const selfNames = new Set();
+  const bridge = createBridge({ conf, personas, transport, log, selfNames });
 
   onebot.start();
   log.info(`桥已启动：pet=${conf.pet?.id ?? 'main'} surface=${conf.pet?.surface ?? 'any'} ws=${conf.onebot?.ws}`);
+
+  const learnNames = async () => {
+    for (let i = 0; i < 12; i += 1) {
+      try {
+        const me = await onebot.call('get_login_info');
+        if (me?.nickname) selfNames.add(String(me.nickname));
+        const uid = Number(me?.user_id ?? onebot.selfId);
+        const groups = await onebot.call('get_group_list').catch(() => []);
+        for (const g of groups ?? []) {
+          const m = await onebot
+            .call('get_group_member_info', { group_id: g.group_id, user_id: uid, no_cache: true })
+            .catch(() => null);
+          if (m?.card) selfNames.add(String(m.card));
+        }
+        if (selfNames.size) {
+          log.info(`认名字：${[...selfNames].join(' / ')}（手打 @名字 也算在叫她）`);
+          return;
+        }
+      } catch {
+        /* 还没连上，等一会儿再试 */
+      }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  };
+  void learnNames();
 
   const shutdown = () => {
     log.info('收到退出信号，断开 OneBot');

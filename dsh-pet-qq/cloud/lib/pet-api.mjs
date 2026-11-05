@@ -398,6 +398,16 @@ function bucketOf(petId, kind, conv) {
 const ACTION_WORDS =
   /尾巴|耳朵|鳍耳|鲸尾|眼镜|围裙|饭碗|碗|机柜|抬头|低头|歪头|点头|摇头|摇|抖|拍|缩|抱|推|凑|愣|叹气|鼓|戳|蹭|甩|眨|转身|伸|趴|躺|跳|挥手|嘟嘴|撇嘴|摸|揉|挠|戳/;
 
+/**
+ * 模型偶尔用空格代替逗号写中文（「今天好累 早点睡吧 别熬夜」），发出去就是带空格的怪句子。
+ * 把两个汉字之间的空格换成逗号；英文/数字旁边的空格不动（那是正常的）。
+ */
+export function spaceToComma(text) {
+  return String(text ?? '')
+    .replace(/([\u4e00-\u9fa5])[ \t]+(?=[\u4e00-\u9fa5])/g, '$1，')
+    .replace(/，{2,}/g, '，');
+}
+
 export function stripActionNotes(text) {
   const s = String(text ?? '');
   if (!s) return s;
@@ -687,7 +697,7 @@ export async function chat(
   const wantBias = groupReply ? (conf.splitChanceGroup ?? 0) : conf.splitChance;
   const maxBubbles = Math.max(1, Math.min(4, Math.floor(Number(wantBubbles) || 1)));
   const bias = Number.isFinite(Number(wantBias)) ? Number(wantBias) : groupReply ? 0 : 0.5;
-  const segments = tidyBubbles(splitBubbles(stripActionNotes(finalText), { max: maxBubbles, bias }));
+  const segments = tidyBubbles(splitBubbles(spaceToComma(stripActionNotes(finalText)), { max: maxBubbles, bias }));
   const stored = (segments.length ? segments.join(' ') : finalText).trim();
 
   await appendMessages(ENTRY, bucket, [
