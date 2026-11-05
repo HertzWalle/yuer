@@ -93,7 +93,7 @@ async function main() {
   }
 
   const { start } = await import('./qq-bridge.mjs');
-  const { bridge } = await start(tmpConf);
+  const { bridge, conf: bridgeConf } = await start(tmpConf);
 
   // 主动性调度：承诺兑现 + 私聊主动开口（配置在 bridge.config.json 的 proactive 段）
   try {
@@ -109,6 +109,27 @@ async function main() {
     scheduler.start();
   } catch (e) {
     console.error('[boot] 主动性调度启动失败（机器人仍可正常对话）：' + (e?.message ?? e));
+  }
+
+  // 控制台（可选）：配了 PANEL_TOKEN 才起，只绑回环，改参数不用重启
+  if ((process.env.PANEL_TOKEN || '').trim()) {
+    try {
+      const { createPanelServer } = await import('./panel-server.mjs');
+      await createPanelServer({
+        host: (process.env.PANEL_HOST || '127.0.0.1').trim(),
+        port: Number(process.env.PANEL_PORT || 3040) || 3040,
+        token: process.env.PANEL_TOKEN.trim(),
+        configPath: join(ROOT, 'bridge.config.json'),
+        // 桥和调度器各拿一个对象，两个都要跟着改，否则「面板改了但行为没变」
+        confs: [baseConf, bridgeConf],
+        version: (await readFile(join(ROOT, 'VERSION'), 'utf8').catch(() => '0.0.0')).trim(),
+        log: { info: (m) => console.log(`[panel] ${m}`), error: (m) => console.error(`[panel] ${m}`) },
+      });
+    } catch (e) {
+      console.error('[boot] 控制台启动失败（机器人仍可正常对话）：' + (e?.message ?? e));
+    }
+  } else {
+    console.log('[boot] 没配 PANEL_TOKEN，控制台不启动');
   }
 
   console.log('[boot] 已启动。日志见 logs/bridge.log，主动行为决策见 logs/trace.jsonl');

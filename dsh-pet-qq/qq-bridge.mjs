@@ -1572,7 +1572,8 @@ export async function start(configPath = DEFAULT_CONFIG_PATH) {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-  return { bridge, onebot };
+  // conf 一并返回：面板要在不重启的前提下原地改它（深合并），桥里所有闭包就都读到新值
+  return { bridge, onebot, conf };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -119,6 +119,11 @@ export async function currentPrompt(petId = 'main', surface = 'any', conv = '') 
 const PERSONAS_PATH = join(DIST_ROOT, 'personas.json');
 let personaCache = null;
 
+/** 面板改完 personas.json 之后叫一声，让下次读取重新加载（进程内缓存） */
+export function invalidatePersonas() {
+  personaCache = null;
+}
+
 /** 读 personas.json（读失败不致命：退回 pet.json 里的那份人设） */
 async function personasList() {
   if (personaCache) return personaCache;

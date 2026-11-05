@@ -1,3 +1,33 @@
+## v1.17.0 — 控制台：状态看得见，参数点着改（2026-11-05）
+
+### 新增
+- **`cloud/panel-server.mjs`**：零依赖（node:http）的小面板后端，只绑 `127.0.0.1:3040`，`PANEL_TOKEN` 鉴权（头 / `?token=` / cookie 三选一），缺 token 拒绝启动。
+- **`cloud/panel/index.html`**：单文件前端（无构建工具、无依赖），五页：状态 / 参数 / 人格 / 记忆 / 日志。
+- **`cloud/lib/config.mjs`**：`PET_RULES`(9) + `BRIDGE_RULES`(41) 白名单 + `validatePatch` + `project` + `writeJsonAtomic` + `deepMerge`；面板写盘后**原地合并进运行中的 conf**，下一次回复就生效，不用重启。
+
+### 能改什么
+- 私聊主动：开关、每小时涨多少冲动、开口阈值、每次消耗、日上限、最小间隔、刚聊过多久不打扰、静默时段、是否交给 Letta 想。
+- 群里：插话开关、占群比、冷清开场分钟数、四档（热闹/正常/冷清/死寂）的每天上限 / 每小时 / 最小间隔 / 机会分门槛。
+- 表达：气泡条数与拆句概率（私聊/群分开）、表情包概率与冷却、图片延迟、语音开关与概率、画图开关与私聊/群配额。
+- 人格：6 套一键切换（私聊 / 群默认），prompt 可直接编辑保存（`invalidatePersonas()` 让缓存失效）。
+- 记忆：按桶看最后 80 条、逐条「忘掉」、自我模型（≤220 字）直接改。
+
+### 能看什么
+- 冲动条（带阈值刻度）、今日次数、待兑现承诺、静默时段、心情、规矩、群档位与反感度、记忆桶统计。
+- **上下文预算条**（system / history / memory / notes 各占多少 token，照 Letta ADE）。
+- 用量（今天调用/输入/输出、区间、按 kind、折算美元）。
+- 日志页 SSE 实时跟 `logs/trace.jsonl` 与 `logs/bridge.log`。
+
+### 访问
+```text
+双击 open-panel.cmd   # 读 token → 建隧道 → 开浏览器（窗口留着，关掉即断）
+```
+手动：`ssh -F .ssh/ssh_config -i .ssh/server.pem -N -L 3040:127.0.0.1:3040 ubuntu@124.220.183.169`
+然后开 `http://127.0.0.1:3040/?token=<PANEL_TOKEN>`。只绑本机、绝不暴露公网；`.env` 里的 key 一律只读、不返回。
+
+### 自测
+- `cloud/panel-server.mjs` 本机冒烟：`/api/overview` 200、`/api/config` 41 个 bridge 键、非法 patch 报 `要在 0~60 之间` / `不是可改的参数`、合法 patch 落盘且 `behavior.letta` 等无关键完好、`/api/personas` 6 个人格带字数、无 token → 401。
+- 修 Windows 静态路径 bug（`normalize('/')` 变成 `\` → 首页 404）。
 ## v1.16.2 — 修群里 @ 她不回（2026-11-05）
 
 ### 问题

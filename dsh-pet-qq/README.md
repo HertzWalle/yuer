@@ -427,7 +427,40 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 - 安全硬拦：`cloud/lib/imagegen.mjs` 的 `BLOCKED` 正则拦露骨/血腥/未成年性化/真人私照类描述，命中直接回「这个我不画。」——不靠模型自觉。
 - 额度账：`data/image-quota.json` 按天按场景计数（北京时间的「今天」），只留 14 天。
 
-### 调参对照表（自己改这些，不用改代码）
+### 控制台（v1.17.0：状态看得见，参数点着改）
+
+以前改一个阈值要 `ssh` 上去改 JSON 再重启；现在有一块小面板，五页：
+
+| 页 | 看什么 / 改什么 |
+| --- | --- |
+| **状态** | 冲动条（带阈值刻度）、今日开口次数、待兑现承诺、静默时段、心情与规矩 chips、群档位与反感度、记忆桶、用量；**上下文预算条**（system / history / memory / notes 各占多少 token） |
+| **参数** | 三张卡：私聊主动 / 群里（含四档配额）/ 表达（气泡、表情包、图片、语音、画图）。滑块与数字框联动，每项标着默认值，保存即生效——**不用重启** |
+| **人格** | 6 套人格卡片，「设为私聊 / 设为群默认」一键切，prompt 可直接编辑保存 |
+| **记忆** | 按桶翻最后 80 条对话、逐条「忘掉」、自我模型（≤220 字）直接改 |
+| **日志** | SSE 实时跟 `logs/trace.jsonl`（每次决策的冲动、闸门、说了什么）与 `logs/bridge.log` |
+
+访问方式（只绑本机，绝不暴露公网）——最省事是双击：
+
+```text
+open-panel.cmd
+```
+
+它读 `cloudot.env` 里的 `PANEL_TOKEN`、建 SSH 隧道、再把带 token 的地址丢给浏览器；窗口留着，关掉就断。
+
+手动也行：
+
+```bash
+ssh -F .ssh/ssh_config -i .ssh/server.pem -N -L 3040:127.0.0.1:3040 ubuntu@124.220.183.169
+# 浏览器开 http://127.0.0.1:3040/?token=<PANEL_TOKEN>
+```
+
+（token 在服务器 `/opt/dsh-pet/.env` 与本地 `cloudot.env`，两边一致。）
+页面对 `/api/*` 校验 token，静态页本身可以打开；token 错会弹输入框。
+
+实现：`cloud/panel-server.mjs`（node:http，零依赖）+ `cloud/panel/index.html`（单文件，无构建）+ `cloud/lib/config.mjs`（9 + 41 项白名单校验、原子写盘、**原地合并进运行时的 conf**）。
+面板改的只是白名单里的参数；`.env` 里的密钥一概只读、不返回。
+
+### 调参对照表（命令行/API 方式，面板见上一节）
 
 改完都执行 `sudo systemctl restart dsh-pet-bot`（`pet.json` 与 `bridge.config.json` 都是启动时读）。JSON 要保证格式正确，改坏了用 `sudo cp /opt/dsh-pet/data/pet.json.bak …` 回滚。
 
@@ -541,6 +574,9 @@ QQ 的登录态不是永久的：小号被手机端踢、或者隔几天 token �
 | `cloud/lib/qzone.mjs` | QQ 空间：`get_cookies` → `g_tk`(p_skey) → `send_qzone_msg` / `emotion_cgi_publish_v6` 发说说，`emotion_cgi_msglist_v6` 读动态 |
 | `cloud/lib/semantic.mjs` | 语义记忆 `data/semantic.json`：importance / 关键词 `recall` / 衰减归档 / `forget` |
 | `cloud/remote-deploy-v2.sh` | 服务器侧一键：更新代码 + memes + 合并 `surfaces`/`identity` + 重启 |
+| `open-panel.ps1` / `open-panel.cmd` | 本机一键：读 `PANEL_TOKEN` → 建 SSH 隧道 3040 → 开浏览器 |
+| `cloud/panel-server.mjs` / `cloud/panel/index.html` | 控制台后端（node:http，零依赖）与单文件前端 |
+| `cloud/lib/config.mjs` | 面板参数白名单、校验、原子写盘、热合并 |
 | `cloud/remote-deploy-v4.sh` | 服务器侧一键：v1.3 表情包资格/气泡参数合并 + 重启 |
 | `cloud/remote-deploy-v5.sh` | 服务器侧一键：v1.3 全量参数（含 `qzone` 段）+ 重启 |
 | `cloud/remote-deploy-v6.sh` | 服务器侧一键：v1.4 按群人格（`surfaces.groups`）+ 重启 |

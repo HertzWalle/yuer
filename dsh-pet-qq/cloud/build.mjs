@@ -124,7 +124,7 @@ async function main() {
 
   // 云端 lib：pet-api 换成云实现，其余（下载器不需要）不打包
   await cp(join(HERE, 'lib', 'pet-api.mjs'), join(DIST, 'lib', 'pet-api.mjs'));
-  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs', 'feeds.mjs', 'memory-manager.mjs', 'turn-server.mjs', 'version.mjs', 'vision.mjs', 'usage.mjs', 'letta.mjs', 'letta-audit.mjs', 'profiles.mjs', 'tts.mjs', 'imagegen.mjs']) {
+  for (const f of ['prompt.mjs', 'memes.mjs', 'store.mjs', 'llm.mjs', 'agency.mjs', 'commitments.mjs', 'proactive.mjs', 'scheduler.mjs', 'groups.mjs', 'group-chat.mjs', 'qzone.mjs', 'semantic.mjs', 'feeds.mjs', 'memory-manager.mjs', 'turn-server.mjs', 'version.mjs', 'vision.mjs', 'usage.mjs', 'letta.mjs', 'letta-audit.mjs', 'profiles.mjs', 'tts.mjs', 'imagegen.mjs', 'config.mjs']) {
     await cp(join(HERE, 'lib', f), join(DIST, 'lib', f));
   }
 
@@ -143,6 +143,10 @@ async function main() {
   // 运行时脚本
   await cp(join(HERE, 'backup-server.mjs'), join(DIST, 'backup-server.mjs'));
   await cp(join(HERE, 'start-bot.mjs'), join(DIST, 'start-bot.mjs'));
+  await cp(join(HERE, 'panel-server.mjs'), join(DIST, 'panel-server.mjs'));
+  if (existsSync(join(HERE, 'panel'))) {
+    await cp(join(HERE, 'panel'), join(DIST, 'panel'), { recursive: true });
+  }
   await cp(join(HERE, '.env.example'), join(DIST, '.env.example'));
   await cp(join(HERE, 'deploy.md'), join(DIST, 'deploy.md'));
   await cp(join(HERE, 'systemd'), join(DIST, 'systemd'), { recursive: true });

@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>鱼儿控制台</title>
+<style>
+  :root {
+    --bg: #f4f7fb; --card: #ffffff; --ink: #16202e; --dim: #6b7a90; --line: #e2e9f3;
+    --blue: #3b6ef5; --blue-soft: #e8efff; --green: #2fae7a; --amber: #e39b1f; --red: #d9544d;
+    --shadow: 0 1px 2px rgba(16,32,64,.06), 0 8px 24px rgba(16,32,64,.06);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 14px 20px;
+    background: var(--card); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); }
+  header .meta { margin-left: auto; color: var(--dim); font-size: 12px; }
+  nav {
+    display: flex; gap: 4px; padding: 8px 16px; background: var(--card);
+    border-bottom: 1px solid var(--line); position: sticky; top: 53px; z-index: 4; overflow-x: auto;
+  }
+  nav button {
+    border: 0; background: transparent; color: var(--dim); padding: 8px 14px; border-radius: 8px;
+    font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  nav button.on { background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+  main { padding: 18px 20px 48px; max-width: 1080px; margin: 0 auto; }
+  section { display: none; }
+  section.on { display: block; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px 18px; margin-bottom: 14px; box-shadow: var(--shadow);
+  }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: var(--dim); font-weight: 600; letter-spacing: .3px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .kpi { flex: 1 1 150px; }
+  .kpi .v { font-size: 26px; font-weight: 680; letter-spacing: -.5px; }
+  .kpi .v small { font-size: 13px; color: var(--dim); font-weight: 500; }
+  .kpi .l { color: var(--dim); font-size: 12px; }
+  .bar { height: 12px; border-radius: 6px; background: #eef2f8; overflow: hidden; margin-top: 10px; position: relative; }
+  .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #6f9bff, var(--blue)); border-radius: 6px; transition: width .4s; }
+  .bar .mark { position: absolute; top: -2px; width: 2px; height: 16px; background: var(--amber); }
+  .budget { display: flex; height: 16px; border-radius: 8px; overflow: hidden; background: #eef2f8; }
+  .budget div { height: 100%; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--dim); }
+  .legend span i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  .list { display: grid; gap: 8px; }
+  .item { border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font-size: 13px; }
+  .item .t { color: var(--dim); font-size: 11px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { background: var(--blue-soft); color: var(--blue); border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+  .chip.warn { background: #fff4e0; color: var(--amber); }
+  .chip.bad { background: #fdeceb; color: var(--red); }
+  .chip.ok { background: #e8f7ef; color: var(--green); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; }
+  .field { display: grid; grid-template-columns: 1fr 220px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px dashed var(--line); }
+  .field:last-child { border-bottom: 0; }
+  .field .name { font-size: 13px; }
+  .field .name code { color: var(--dim); font-size: 11px; }
+  .field .ctl { display: flex; align-items: center; gap: 10px; }
+  .field input[type=range] { flex: 1; accent-color: var(--blue); }
+  .field input[type=number], .field input[type=time] {
+    width: 74px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 7px; font-size: 13px;
+  }
+  .field .val { min-width: 46px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .def { color: var(--dim); font-size: 11px; }
+  .btn {
+    border: 1px solid var(--line); background: var(--card); border-radius: 9px; padding: 7px 14px;
+    font-size: 13px; cursor: pointer;
+  }
+  .btn.primary { background: var(--blue); color: #fff; border-color: var(--blue); }
+  .btn.ghost { color: var(--dim); }
+  .btn:hover { filter: brightness(.98); }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    background: #16202e; color: #fff; padding: 9px 16px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 20;
+  }
+  .toast.on { opacity: .95; }
+  .persona { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 10px; }
+  .persona h3 { margin: 0 0 4px; font-size: 14px; }
+  .persona p { margin: 0; color: var(--dim); font-size: 12px; }
+  .persona .tags { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  textarea {
+    width: 100%; min-height: 130px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font: 13px/1.6 ui-monospace, "Cascadia Code", Consolas, monospace; resize: vertical;
+  }
+  .msg { border-left: 3px solid var(--line); padding: 6px 0 6px 10px; margin-bottom: 8px; font-size: 13px; }
+  .msg.user { border-color: #9fb6ff; } .msg.assistant { border-color: #cfe0d5; }
+  .msg .who { color: var(--dim); font-size: 11px; }
+  .stream { font: 12px/1.6 ui-monospace, Consolas, monospace; max-height: 320px; overflow: auto; background: #0f1622; color: #cfe0ff; border-radius: 10px; padding: 10px 12px; }
+  .stream .k { color: #7fd1a8; } .stream .t { color: #7f93ad; }
+  .muted { color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="live"></span>
+  <h1>鱼儿控制台</h1>
+  <span class="meta" id="meta">连接中…</span>
+</header>
+<nav>
+  <button data-tab="state" class="on">状态</button>
+  <button data-tab="params">参数</button>
+  <button data-tab="personas">人格</button>
+  <button data-tab="memory">记忆</button>
+  <button data-tab="logs">日志</button>
+</nav>
+
+<main>
+  <section id="state" class="on"></section>
+  <section id="params"><div class="muted">载入中…</div></section>
+  <section id="personas"><div class="muted">载入中…</div></section>
+  <section id="memory"><div class="muted">载入中…</div></section>
+  <section id="logs">
+    <div class="card">
+      <h2>实时决策流（trace.jsonl）</h2>
+      <div class="stream" id="stream"><div class="t">等待事件…</div></div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN = (() => {
+  const fromUrl = new URLSearchParams(location.search).get('token');
+  if (fromUrl) { try { localStorage.setItem('panel_token', fromUrl); } catch {} return fromUrl; }
+  try { return localStorage.getItem('panel_token') || ''; } catch { return ''; }
+})();
+const api = async (path, opt = {}, retry = true) => {
+  const res = await fetch(path, {
+    ...opt,
+    headers: { 'content-type': 'application/json', 'x-panel-token': TOKEN, ...(opt.headers || {}) },
+  });
+  if (res.status === 401 && retry) {
+    const typed = prompt('面板 token（服务器 .env 里的 PANEL_TOKEN）：', '');
+    if (typed) {
+      try { localStorage.setItem('panel_token', typed); } catch {}
+      location.search = '?token=' + encodeURIComponent(typed);
+      return new Promise(() => {});
+    }
+  }
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '请求失败 ' + res.status);
+  return res.json();
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmtTime = (iso) => { if (!iso) return '—'; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString('zh-CN', { hour12: false }); };
+let toastTimer;
+function toast(text) {
+  const el = document.getElementById('toast');
+  el.textContent = text; el.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), 2200);
+}
+
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  document.querySelectorAll('main section').forEach((s) => s.classList.toggle('on', s.id === b.dataset.tab));
+  if (b.dataset.tab === 'logs') startStream();
+}));
+
+/* ------------------------------- 状态 ------------------------------- */
+const COLORS = { system: '#3b6ef5', history: '#22c3e6', memory: '#7bd389', notes: '#f0a32e' };
+
+async function loadState() {
+  const d = await api('/api/overview');
+  const a = d.agency;
+  const pct = Math.min(100, Math.round((a.impulse / a.cap) * 100));
+  const mark = Math.min(100, Math.round((a.threshold / a.cap) * 100));
+  const budget = d.budget;
+  const bpct = Math.min(100, Math.round((budget.usedTokens / budget.limit) * 100));
+
+  document.getElementById('meta').textContent = `v${d.version} · ${d.pet.name}（${d.pet.active}）· ${new Date(d.now).toLocaleTimeString('zh-CN', { hour12: false })}`;
+
+  document.getElementById('state').innerHTML = `
+    <div class="card">
+      <h2>此刻</h2>
+      <div class="row">
+        <div class="kpi"><div class="v">${a.impulse}<small> / ${a.cap}</small></div><div class="l">冲动值（阈值 ${a.threshold}）</div>
+          <div class="bar"><i style="width:${pct}%"></i><span class="mark" style="left:${mark}%"></span></div></div>
+        <div class="kpi"><div class="v">${a.todayCount}<small> / ${a.dailyLimit}</small></div><div class="l">今日主动开口</div></div>
+        <div class="kpi"><div class="v">${a.commitments?.length ?? (d.commitments || []).length}</div><div class="l">待兑现的承诺</div></div>
+        <div class="kpi"><div class="v">${d.quiet.join('–')}</div><div class="l">静默时段</div></div>
+      </div>
+      <div class="chips" style="margin-top:12px">
+        <span class="chip">心情 亲近 ${(a.mood?.clingy ?? 0).toFixed(2)}</span>
+        <span class="chip">愉悦 ${(a.mood?.valence ?? 0).toFixed(2)}</span>
+        <span class="chip">活跃 ${(a.mood?.arousal ?? 0).toFixed(2)}</span>
+        ${a.lastSpoke ? `<span class="chip">上次开口 ${fmtTime(a.lastSpoke)}</span>` : '<span class="chip">还没主动开口过</span>'}
+        ${a.pausedUntil ? `<span class="chip warn">安静到 ${fmtTime(a.pausedUntil)}</span>` : ''}
+        ${(a.rules || []).map((r) => `<span class="chip bad">规矩：${esc(r.text || r)}</span>`).join('')}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>这一轮 prompt 里装了什么（约 ${budget.usedTokens} / ${budget.limit} tokens）</h2>
+      <div class="budget">
+        ${budget.parts.map((p) => `<div style="width:${(p.tokens / budget.limit) * 100}%;background:${COLORS[p.key] || '#ccc'}" title="${esc(p.label)} ${p.tokens}"></div>`).join('')}
+        <div style="flex:1;background:#eef2f8"></div>
+      </div>
+      <div class="legend">
+        ${budget.parts.map((p) => `<span><i style="background:${COLORS[p.key] || '#ccc'}"></i>${esc(p.label)} ${p.tokens} tok（${p.chars} 字）</span>`).join('')}
+        <span>占用 ${bpct}%</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>待兑现（${(d.commitments || []).length}）</h2>
+      <div class="list">
+        ${(d.commitments || []).map((c) => `<div class="item">${esc(c.what)}<div class="t">${fmtTime(c.dueAt)} · ${esc(c.conv || '')}</div></div>`).join('') || '<div class="muted">没有待办的承诺。</div>'}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>群</h2>
+      ${(d.groups || []).length ? `<table><tr><th>群</th><th>活跃档</th><th>今日/上限</th><th>反感度</th><th>上次开口</th></tr>
+        ${d.groups.map((g) => `<tr><td>${esc(g.conv)}</td><td>${esc(g.tier)}</td>
+          <td>${g.quota?.used ?? '—'} / ${g.quota?.limit ?? '—'}</td>
+          <td>${g.annoyance}</td><td>${fmtTime(g.lastSpoke)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">还没有群的记录（她收到群消息后才会出现）。</div>'}
+    </div>
+
+    <div class="card">
+      <h2>记忆存量</h2>
+      ${(d.memory.buckets || []).length ? `<table><tr><th>桶</th><th>条数</th><th>最后一条</th></tr>
+        ${d.memory.buckets.map((b) => `<tr><td><code>${esc(b.bucket)}</code></td><td>${b.count}</td><td>${fmtTime(b.lastAt)}</td></tr>`).join('')}</table>`
+        : '<div class="muted">还没有记忆。</div>'}
+      <div style="margin-top:12px"><div class="muted">自我模型</div>
+        <div style="margin-top:6px">${esc(d.memory.self.text || '（还没生成）')}</div></div>
+    </div>
+
+    ${d.usage ? `<div class="card"><h2>用量（近 ${d.usage.days} 天）</h2>
+      <div class="row">
+        <div class="kpi"><div class="v">${d.usage.today.calls}</div><div class="l">今天调用</div></div>
+        <div class="kpi"><div class="v">${d.usage.today.prompt}<small> 输入</small></div><div class="l">tokens</div></div>
+        <div class="kpi"><div class="v">${d.usage.today.completion}<small> 输出</small></div><div class="l">tokens</div></div>
+        <div class="kpi"><div class="v">${d.usage.range.calls}</div><div class="l">区间总调用</div></div>
+      </div></div>` : ''}
+  `;
+}
+
+/* ------------------------------- 参数 ------------------------------- */
+const LABELS = {
+  'maxBubbles': ['私聊最多几条消息', '条'],
+  'splitChance': ['私聊拆句概率', ''],
+  'maxBubblesGroup': ['群里最多几条消息', '条'],
+  'splitChanceGroup': ['群里拆句概率', ''],
+  'memeChancePrivate': ['私聊带表情包概率', ''],
+  'memeChanceGroup': ['群里带表情包概率', ''],
+  'memeCooldown': ['带图冷却', '分钟'],
+  'drawEnabled': ['允许她自己画图', ''],
+  'drawInGroup': ['群里也允许画', ''],
+  'proactive.enabled': ['主动开口总开关', ''],
+  'proactive.ratePerHour': ['每小时涨多少冲动', '/小时'],
+  'proactive.impulseThreshold': ['开口阈值', ''],
+  'proactive.impulseCost': ['每次开口消耗', ''],
+  'proactive.dailyLimit': ['每天最多开口', '条'],
+  'proactive.minGapMin': ['两次开口最小间隔', '分钟'],
+  'proactive.recentGuardMin': ['刚聊过多久内不打扰', '分钟'],
+  'proactive.quietHours.0': ['静默开始', ''],
+  'proactive.quietHours.1': ['静默结束', ''],
+  'proactive.viaLetta': ['开口内容交给 Letta 想', ''],
+  'behavior.coalesceMs': ['连发合并窗口', 'ms'],
+  'behavior.maxBubbles': ['发送侧气泡上限（私聊）', '条'],
+  'behavior.maxBubblesGroup': ['发送侧气泡上限（群）', '条'],
+  'behavior.bubbleDelayMs': ['气泡间隔', 'ms'],
+  'behavior.tailPauseMs': ['尾句停顿', 'ms'],
+  'behavior.imageDelayMs': ['图片延迟', 'ms'],
+  'behavior.voice.enabled': ['语音开关', ''],
+  'behavior.voice.chance': ['语音概率', ''],
+  'behavior.draw.enabled': ['画图开关（/画 与 [画:]）', ''],
+  'behavior.draw.limitPrivate': ['私聊画图上限', '张/天'],
+  'behavior.draw.limitGroup': ['群画图上限', '张/天'],
+  'behavior.observeGroups': ['旁听群聊', ''],
+  'proactive.group.enabled': ['群里插话开关', ''],
+  'proactive.group.shareCap': ['占群比上限', ''],
+  'proactive.group.idleOpenMin': ['冷清多久后开场', '分钟'],
+};
+const GROUP_LABEL = { hot: '热闹', normal: '正常', quiet: '冷清', dead: '死寂' };
+const DEFAULTS = {
+  'maxBubbles': 3, 'splitChance': 0.35, 'maxBubblesGroup': 1, 'splitChanceGroup': 0,
+  'memeChancePrivate': 0.22, 'memeChanceGroup': 0.08, 'memeCooldown': 5,
+  'proactive.ratePerHour': 9, 'proactive.impulseThreshold': 58, 'proactive.impulseCost': 38,
+  'proactive.dailyLimit': 8, 'proactive.minGapMin': 35, 'proactive.recentGuardMin': 20,
+  'behavior.maxBubbles': 3, 'behavior.maxBubblesGroup': 1, 'behavior.bubbleDelayMs': 700,
+  'behavior.tailPauseMs': 800, 'behavior.imageDelayMs': 600, 'behavior.coalesceMs': 1600,
+  'behavior.draw.limitPrivate': 10, 'behavior.draw.limitGroup': 10,
+  'proactive.group.shareCap': 0.06, 'proactive.group.idleOpenMin': 25,
+};
+
+function labelOf(key) {
+  const m = /^proactive\.group\.(dailyLimit|hourLimit|minGapSec|urgencyMin)\.(hot|normal|quiet|dead)$/.exec(key);
+  if (m) {
+    const what = { dailyLimit: '每天上限', hourLimit: '每小时', minGapSec: '最小间隔（秒）', urgencyMin: '机会分门槛' }[m[1]];
+    return [`${GROUP_LABEL[m[2]]}群 · ${what}`, ''];
+  }
+  return LABELS[key] || [key, ''];
+}
+
+function fieldHtml(target, key, value, rule) {
+  const [label, unit] = labelOf(key);
+  const [type, min, max] = rule;
+  const def = DEFAULTS[key];
+  const defHint = def !== undefined ? `<span class="def">默认 ${def}</span>` : '';
+  if (type === 'bool') {
+    return `<div class="field"><div class="name">${esc(label)} <code>${esc(key)}</code></div>
+      <div class="ctl"><label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" data-t="${target}" data-k="${key}" ${value ? 'checked' : ''}/>
+        <span>${value ? '开' : '关'}</span></label>${defHint}</div></div>`;
+  }
+  if (type === 'hm') {
+    return `<div class="field"><div class="name">${esc(label)} <code>${esc(key)}</code></div>
+      <div class="ctl"><input type="time" data-t="${target}" data-k="${key}" value="${esc(value)}"/></div></div>`;
+  }
+  const step = type === 'int' ? 1 : 0.01;
+  return `<div class="field"><div class="name">${esc(label)} ${unit ? `<span class="def">${unit}</span>` : ''} <code>${esc(key)}</code></div>
+    <div class="ctl">
+      <input type="range" min="${min}" max="${max}" step="${step}" value="${value}" data-t="${target}" data-k="${key}"/>
+      <input type="number" min="${min}" max="${max}" step="${step}" value="${value}" data-t="${target}" data-k="${key}"/>
+      ${defHint}
+    </div></div>`;
+}
+
+let configCache = null;
+async function loadParams() {
+  const d = await api('/api/config');
+  configCache = d;
+  const petKeys = ['maxBubbles', 'splitChance', 'maxBubblesGroup', 'splitChanceGroup', 'memeChancePrivate', 'memeChanceGroup', 'memeCooldown', 'drawEnabled', 'drawInGroup'];
+  const groupKeys = Object.keys(d.rules.bridge).filter((k) => k.startsWith('proactive.group.'));
+  const bridgeKeys = Object.keys(d.rules.bridge).filter((k) => !k.startsWith('proactive.group.'));
+
+  document.getElementById('params').innerHTML = `
+    <div class="card"><h2>私聊主动</h2>
+      ${bridgeKeys.filter((k) => k.startsWith('proactive.') && ['proactive.enabled','proactive.ratePerHour','proactive.impulseThreshold','proactive.impulseCost','proactive.dailyLimit','proactive.minGapMin','proactive.recentGuardMin','proactive.quietHours.0','proactive.quietHours.1','proactive.viaLetta'].includes(k))
+        .map((k) => fieldHtml('bridge', k, d.bridge[k], d.rules.bridge[k])).join('')}
+      <div class="actions"><button class="btn primary" data-save="bridge-inner">保存</button></div>
+    </div>
+
+    <div class="card"><h2>群里</h2>
+      ${bridgeKeys.filter((k) => k === 'proactive.group.enabled' || k === 'proactive.group.shareCap' || k === 'proactive.group.idleOpenMin')
+        .map((k) => fieldHtml('bridge', k, d.bridge[k], d.rules.bridge[k])).join('')}
+      ${groupKeys.map((k) => fieldHtml('bridge', k, d.bridge[k], d.rules.bridge[k])).join('')}
+      <div class="actions"><button class="btn primary" data-save="bridge">保存</button></div>
+    </div>
+
+    <div class="card"><h2>表达（气泡 / 图片 / 语音 / 画图）</h2>
+      ${petKeys.map((k) => fieldHtml('pet', k, d.pet[k], d.rules.pet[k])).join('')}
+      ${bridgeKeys.filter((k) => k.startsWith('behavior.')).map((k) => fieldHtml('bridge', k, d.bridge[k], d.rules.bridge[k])).join('')}
+      <div class="actions"><button class="btn primary" data-save="both">保存</button></div>
+    </div>
+  `;
+
+  // 滑块与数字框联动
+  document.querySelectorAll('#params input').forEach((el) => {
+    const twin = el.type === 'range' ? el.parentElement.querySelector('input[type=number]') : el.parentElement.querySelector('input[type=range]');
+    if (!twin) return;
+    el.addEventListener('input', () => { twin.value = el.value; });
+  });
+  document.querySelectorAll('#params [data-save]').forEach((b) => b.addEventListener('click', () => saveParams(b.dataset.save)));
+}
+
+async function saveParams(scope) {
+  const pick = (target) => {
+    const out = {};
+    document.querySelectorAll(`#params input[data-t="${target}"]`).forEach((el) => {
+      const key = el.dataset.k;
+      if (el.type === 'checkbox') out[key] = el.checked;
+      else if (el.type === 'range' || el.type === 'number') {
+        if (el.type === 'number' && document.activeElement === el) return;
+        out[key] = Number(el.value);
+      } else out[key] = el.value;
+    });
+    return out;
+  };
+  try {
+    const jobs = [];
+    if (scope !== 'pet') jobs.push(api('/api/config', { method: 'POST', body: JSON.stringify({ target: 'bridge', patch: pick('bridge') }) }));
+    if (scope !== 'bridge' && scope !== 'bridge-inner') jobs.push(api('/api/config', { method: 'POST', body: JSON.stringify({ target: 'pet', patch: pick('pet') }) }));
+    await Promise.all(jobs);
+    toast('已保存，下一句就生效');
+    loadState().catch(() => {});
+  } catch (e) {
+    toast('保存失败：' + e.message);
+  }
+}
+
+/* ------------------------------- 人格 ------------------------------- */
+async function loadPersonas() {
+  const d = await api('/api/personas');
+  const badge = (id) => {
+    const out = [];
+    if (d.surfaces.private === id) out.push('<span class="chip">私聊</span>');
+    if (d.surfaces.group === id) out.push('<span class="chip">群默认</span>');
+    const groups = Object.entries(d.surfaces.groups || {}).filter(([, v]) => v === id).map(([g]) => g);
+    if (groups.length) out.push(`<span class="chip ok">群 ${groups.join('/')}</span>`);
+    return out.join('');
+  };
+  document.getElementById('personas').innerHTML = `
+    <div class="card"><h2>切人格（只影响你选的场景）</h2>
+      ${d.personas.map((p) => `<div class="persona">
+        <h3>${esc(p.name)} <span class="def">${esc(p.label || '')} · ${p.chars} 字</span></h3>
+        <p>${esc(p.tagline || '')}</p>
+        <div class="tags">${badge(p.id)}
+          <button class="btn" data-use="${esc(p.id)}" data-surface="private">设为私聊</button>
+          <button class="btn" data-use="${esc(p.id)}" data-surface="group">设为群默认</button>
+          <button class="btn ghost" data-edit="${esc(p.id)}">编辑 prompt</button>
+        </div>
+      </div>`).join('')}
+    </div>
+    <div class="card" id="editor" style="display:none">
+      <h2>编辑 prompt <span class="def" id="edit-who"></span></h2>
+      <textarea id="prompt"></textarea>
+      <div class="actions"><button class="btn ghost" id="cancel-edit">取消</button><button class="btn primary" id="save-prompt">保存</button></div>
+    </div>`;
+
+  document.querySelectorAll('[data-use]').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api('/api/personas/use', { method: 'POST', body: JSON.stringify({ personaId: b.dataset.use, surface: b.dataset.surface }) });
+      toast('换好了');
+      loadPersonas();
+    } catch (e) { toast('换不了：' + e.message); }
+  }));
+
+  document.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
+    const p = d.personas.find((x) => x.id === b.dataset.edit);
+    document.getElementById('editor').style.display = 'block';
+    document.getElementById('edit-who').textContent = `${p.name}（${p.id}）`;
+    document.getElementById('prompt').value = p.prompt;
+    document.getElementById('editor').scrollIntoView({ behavior: 'smooth' });
+  }));
+  document.getElementById('cancel-edit').onclick = () => { document.getElementById('editor').style.display = 'none'; };
+  document.getElementById('save-prompt').onclick = async () => {
+    const id = /（(.+)）/.exec(document.getElementById('edit-who').textContent)?.[1];
+    try {
+      await api('/api/personas/' + encodeURIComponent(id), { method: 'PUT', body: JSON.stringify({ prompt: document.getElementById('prompt').value }) });
+      toast('人格已更新');
+      document.getElementById('editor').style.display = 'none';
+      loadPersonas();
+    } catch (e) { toast('存不了：' + e.message); }
+  };
+}
+
+/* ------------------------------- 记忆 ------------------------------- */
+let memBuckets = [];
+async function loadMemoryTab() {
+  const ov = await api('/api/overview');
+  memBuckets = ov.memory.buckets || [];
+  const cur = memBuckets[0]?.bucket || 'main.main';
+  document.getElementById('memory').innerHTML = `
+    <div class="card"><h2>对话记忆</h2>
+      <div class="chips" style="margin-bottom:12px">
+        ${memBuckets.map((b) => `<button class="btn ${b.bucket === cur ? 'primary' : ''}" data-bucket="${esc(b.bucket)}">${esc(b.bucket)} · ${b.count}</button>`).join('') || '<span class="muted">还没有记忆</span>'}
+      </div>
+      <div id="msgs" class="muted">载入中…</div>
+    </div>
+    <div class="card"><h2>自我模型（她对自己的描述，最多 220 字）</h2>
+      <textarea id="self">${esc(ov.memory.self.text || '')}</textarea>
+      <div class="actions"><button class="btn primary" id="save-self">保存</button></div>
+    </div>`;
+
+  document.querySelectorAll('[data-bucket]').forEach((b) => b.addEventListener('click', () => {
+    document.querySelectorAll('[data-bucket]').forEach((x) => x.classList.toggle('primary', x === b));
+    showMessages(b.dataset.bucket);
+  }));
+  document.getElementById('save-self').onclick = async () => {
+    try {
+      await api('/api/self', { method: 'POST', body: JSON.stringify({ text: document.getElementById('self').value }) });
+      toast('自我模型已更新');
+    } catch (e) { toast('存不了：' + e.message); }
+  };
+  if (memBuckets.length) showMessages(cur);
+  else document.getElementById('msgs').textContent = '还没有记忆。';
+}
+
+async function showMessages(bucket) {
+  const box = document.getElementById('msgs');
+  box.className = '';
+  box.innerHTML = '<div class="muted">载入中…</div>';
+  const d = await api('/api/memory?bucket=' + encodeURIComponent(bucket));
+  box.innerHTML = (d.summary ? `<div class="item" style="margin-bottom:10px"><div class="t">摘要（${esc(d.summary.bucket || '')}）</div>${esc(typeof d.summary.summary === 'string' ? d.summary.summary : JSON.stringify(d.summary.summary || ''))}</div>` : '')
+    + d.messages.map((m, i) => `<div class="msg ${m.role === 'user' ? 'user' : 'assistant'}">
+        <div class="who">${m.role === 'user' ? '对方' : '她'} · ${fmtTime(m.ts)} · 倒数第 ${d.messages.length - i}</div>
+        ${esc(m.content || '')}
+        <button class="btn ghost" data-forget="${i}" style="margin-top:4px;padding:2px 8px;font-size:11px">忘掉这条</button>
+      </div>`).join('') || '<div class="muted">这个桶是空的。</div>';
+
+  box.querySelectorAll('[data-forget]').forEach((b) => b.addEventListener('click', async () => {
+    const idx = d.messages.length - Number(b.dataset.forget);
+    if (!confirm('真的让她忘掉这一条？')) return;
+    try {
+      await api('/api/memory/forget', { method: 'POST', body: JSON.stringify({ bucket, index: idx }) });
+      toast('已忘掉');
+      showMessages(bucket);
+    } catch (e) { toast('删不了：' + e.message); }
+  }));
+}
+
+/* ------------------------------- 日志 ------------------------------- */
+let es = null;
+function startStream() {
+  if (es) return;
+  es = new EventSource('/api/events?token=' + encodeURIComponent(TOKEN));
+  const box = document.getElementById('stream');
+  box.innerHTML = '';
+  es.onmessage = (ev) => {
+    let d;
+    try { d = JSON.parse(ev.data); } catch { return; }
+    const line = document.createElement('div');
+    let text = d.line;
+    try {
+      const j = JSON.parse(d.line);
+      if (j.kind) {
+        const bits = [`<span class="k">${esc(j.kind)}</span>`, j.impulse !== undefined ? `冲动 ${j.impulse}` : '', j.gate ? `闸门 ${esc(j.gate)}` : '', j.text ? esc(j.text) : '', j.note ? esc(j.note) : ''].filter(Boolean);
+        text = `<span class="t">${esc((j.ts || '').slice(11, 19))}</span> ${bits.join(' · ')}`;
+      }
+    } catch { /* 普通日志行 */ }
+    line.innerHTML = text;
+    box.appendChild(line);
+    if (box.childElementCount > 300) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+  };
+  es.onerror = () => { /* EventSource 自己会重连 */ };
+}
+
+/* ------------------------------- 启动 ------------------------------- */
+async function boot() {
+  try {
+    await loadState();
+    loadParams().catch((e) => { document.getElementById('params').innerHTML = `<div class="card muted">参数页出错：${esc(e.message)}</div>`; });
+    loadPersonas().catch((e) => { document.getElementById('personas').innerHTML = `<div class="card muted">人格页出错：${esc(e.message)}</div>`; });
+    loadMemoryTab().catch((e) => { document.getElementById('memory').innerHTML = `<div class="card muted">记忆页出错：${esc(e.message)}</div>`; });
+  } catch (e) {
+    document.getElementById('state').innerHTML = `<div class="card muted">连不上：${esc(e.message)}（token 不对？地址后加 ?token=）</div>`;
+  }
+  setInterval(() => {
+    if (document.querySelector('nav button.on')?.dataset.tab === 'state') loadState().catch(() => {});
+  }, 5000);
+}
+boot();
+</script>
+</body>
+</html>
